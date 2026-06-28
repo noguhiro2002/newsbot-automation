@@ -1,0 +1,31 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+*.egg-info/
+.DS_Store
+._*
+.env
+*.bak
+
+# Local runtime artifacts
+data/
+payloads/
+reports/
+security-scans/
+logs/
+*.sqlite
+*.sqlite3
+*.db
+
+# Never track copied Git internals at the repository root.
+/COMMIT_EDITMSG
+/FETCH_HEAD
+/HEAD
+/ORIG_HEAD
+/index
+/description
+/objects/
+/refs/
+/hooks/
+/info/

@@ -1,0 +1,18 @@
+[Unit]
+Description=Newsbot Discord Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/newsbot-automation
+EnvironmentFile=/opt/newsbot-automation/.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/newsbot-automation/.venv/bin/python -m newsbot.cli run-discord-bot
+Restart=always
+RestartSec=10
+User=newsbot
+Group=newsbot
+
+[Install]
+WantedBy=multi-user.target

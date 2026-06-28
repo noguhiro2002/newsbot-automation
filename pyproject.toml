@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "newsbot"
+version = "0.2.0"
+description = "Topic-based Codex CLI news reviewer and Discord publishing pipeline"
+requires-python = ">=3.11"
+dependencies = [
+  "discord.py>=2.4.0",
+]
+
+[project.scripts]
+newsbot = "newsbot.cli:main"
+
+[tool.setuptools]
+packages = ["newsbot"]

@@ -1,0 +1,18 @@
+{
+  "topic": "stock_news",
+  "cadence": "daily",
+  "period": "2026-05-24 to 2026-05-24 (JST)",
+  "items": [
+    {
+      "title": "Example Semiconductor raises AI server guidance",
+      "summary": "The company raised shipment guidance after stronger AI server demand in the current quarter.",
+      "source": "Official IR",
+      "url": "https://example.com/ir/raise-guidance?utm_source=test",
+      "company": "Example Semiconductor",
+      "ticker": "EXM",
+      "material": "Management cited improved AI server demand and stronger utilization across advanced packaging lines.",
+      "importance_score": 0.91,
+      "priority": "high"
+    }
+  ]
+}
