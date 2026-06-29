@@ -163,7 +163,29 @@ class GeneratePayloadOpenAITests(unittest.TestCase):
         self.assertIn('"topic": "missing_topic"', prompt)
 
     def test_main_skip_codex_writes_multi_agent_prompts_for_lab_automation(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
+        paper_api_result = {
+            "period": "2026-05-30 to 2026-06-06 (JST)",
+            "queries": ["self-driving laboratory"],
+            "candidates": [
+                {
+                    "title": "API candidate paper",
+                    "abstract": "A lab automation paper.",
+                    "authors": ["Ada Example"],
+                    "source": "arXiv",
+                    "url": "https://arxiv.org/abs/2606.12345",
+                    "doi": "",
+                    "published_date": "2026-06-01",
+                    "source_type": "preprint",
+                    "api_source": "arxiv",
+                    "matched_query": "self-driving laboratory",
+                    "raw_categories": ["cs.RO"],
+                }
+            ],
+            "coverage": {"api_queries_run": [], "api_failures": [], "limitations": ""},
+        }
+        with tempfile.TemporaryDirectory() as temp_dir, patch(
+            "scripts.generate_payload_openai.collect_paper_api_candidates", return_value=paper_api_result
+        ):
             temp_path = Path(temp_dir)
             prompt_output = temp_path / "rendered.prompt.txt"
             output = temp_path / "payload.json"
@@ -195,6 +217,36 @@ class GeneratePayloadOpenAITests(unittest.TestCase):
             self.assertIn("No historical Interested feedback", prompt)
             for phase in lab_automation_phase_definitions():
                 self.assertTrue((output.with_suffix(f".{phase.key}.prompt.txt")).exists())
+            self.assertTrue(output.with_suffix(".phase_4.paper_api.json").exists())
+            phase_4_prompt = output.with_suffix(".phase_4.prompt.txt").read_text(encoding="utf-8")
+            self.assertIn("API candidate paper", phase_4_prompt)
+
+    def test_main_skip_codex_disable_paper_api_does_not_collect(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch("scripts.generate_payload_openai.collect_paper_api_candidates") as collect:
+            temp_path = Path(temp_dir)
+            output = temp_path / "payload.json"
+            db_path = temp_path / "newsbot.sqlite3"
+
+            exit_code = main(
+                [
+                    "--topic",
+                    "lab_automation",
+                    "--cadence",
+                    "weekly",
+                    "--period",
+                    "2026-05-30 to 2026-06-06 (JST)",
+                    "--output",
+                    str(output),
+                    "--db",
+                    str(db_path),
+                    "--skip-codex",
+                    "--disable-paper-api",
+                ]
+            )
+
+            self.assertEqual(exit_code, 0)
+            collect.assert_not_called()
+            self.assertFalse(output.with_suffix(".phase_4.paper_api.json").exists())
 
     def test_main_single_agent_skip_codex_uses_legacy_topic_template(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -377,6 +429,7 @@ class GeneratePayloadOpenAITests(unittest.TestCase):
                         "phase_4=low",
                         "--master-reasoning-effort",
                         "high",
+                        "--disable-paper-api",
                         "--validate-only",
                     ]
                 )
@@ -475,6 +528,7 @@ class GeneratePayloadOpenAITests(unittest.TestCase):
                         str(output),
                         "--db",
                         str(db_path),
+                        "--disable-paper-api",
                         "--validate-only",
                     ]
                 )

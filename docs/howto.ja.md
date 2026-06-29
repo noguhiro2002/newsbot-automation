@@ -65,6 +65,8 @@ NEWSBOT_LAB_AUTOMATION_PHASE_1_MODEL=
 NEWSBOT_LAB_AUTOMATION_PHASE_1_REASONING_EFFORT=
 NEWSBOT_LAB_AUTOMATION_MASTER_MODEL=
 NEWSBOT_LAB_AUTOMATION_MASTER_REASONING_EFFORT=
+NEWSBOT_PAPER_API_RETMAX=
+NCBI_API_KEY=
 NEWSBOT_LOOKBACK_DAYS=
 ```
 
@@ -77,6 +79,8 @@ NEWSBOT_LOOKBACK_DAYS=
 - `NEWSBOT_CODEX_REASONING_EFFORT` は `low`, `medium`, `high`, `xhigh` を指定できます。空の場合は Codex CLI 側のデフォルトです。
 - `NEWSBOT_LAB_AUTOMATION_PHASE_<N>_MODEL` と `NEWSBOT_LAB_AUTOMATION_PHASE_<N>_REASONING_EFFORT` で、lab_automation multi-agent のPhase別デフォルトを指定できます。
 - `NEWSBOT_LAB_AUTOMATION_MASTER_MODEL` と `NEWSBOT_LAB_AUTOMATION_MASTER_REASONING_EFFORT` で、Master統合のデフォルトを指定できます。
+- `NEWSBOT_PAPER_API_RETMAX` はPhase 4の論文API取得件数です。空の場合は50です。
+- `NCBI_API_KEY` は任意です。未設定でもPubMed取得は動きます。
 - `NEWSBOT_LOOKBACK_DAYS` が空の場合は、前回成功実行時から今回実行時までを検索します。
 
 ## 4. DBを初期化する
@@ -126,6 +130,7 @@ python scripts/generate_payload_openai.py --topic lab_automation --skip-codex
 このコマンドで保存される`payloads/lab_automation_weekly_<YYYYMMDD_HHMMSS_microseconds>.prompt.txt`が、テンプレートに期間・保存先・設定パス・Interested feedback profileを差し込んだ後の実promptです。
 同じ日に複数回実行しても、実行時刻入りの別ファイルとして残ります。
 multi-agent workflowでは、Phase別に`.phase_1.prompt.txt`、`.phase_1.json`、`.phase_1.codex.log`、最後に`.master.*`も保存されます。
+Phase 4では、Codex実行前に論文API候補を取得し、`.phase_4.paper_api.json`にも保存します。従来のprompt-only探索に戻す場合は`--disable-paper-api`を指定します。
 
 固定日数分だけ検索する場合:
 

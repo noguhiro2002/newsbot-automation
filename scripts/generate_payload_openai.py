@@ -18,6 +18,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from newsbot.config import DEFAULT_CONFIG_PATH, load_config, resolve_project_path
 from newsbot.db import DEFAULT_DB_PATH, NewsbotStore
 from newsbot.models import NewsPayload
+from newsbot.paper_api import collect_paper_api_candidates
 from newsbot.ranking import REVIEW_MAX_ITEMS, rank_news_items
 
 
@@ -417,6 +418,18 @@ def master_reasoning_for(master_reasoning_effort: str, default_effort: str) -> s
     return effort
 
 
+def paper_api_retmax(explicit_retmax: int | None) -> int:
+    if explicit_retmax is not None:
+        return max(1, explicit_retmax)
+    env_value = os.getenv("NEWSBOT_PAPER_API_RETMAX", "").strip()
+    if env_value:
+        try:
+            return max(1, int(env_value))
+        except ValueError as exc:
+            raise ValueError(f"NEWSBOT_PAPER_API_RETMAX must be an integer: {env_value}") from exc
+    return 50
+
+
 def lab_automation_prompt_dir(template_dir: Path = PROMPT_TEMPLATE_DIR) -> Path:
     return template_dir / LAB_AUTOMATION_TOPIC
 
@@ -473,11 +486,21 @@ def build_phase_prompt(
     output_path: Path,
     config_path: Path,
     preference_profile: dict[str, Any] | None,
+    extra_values: dict[str, str] | None = None,
     template_dir: Path = PROMPT_TEMPLATE_DIR,
 ) -> tuple[str, Path]:
     template_path = lab_automation_prompt_dir(template_dir) / phase.prompt_file
     if not template_path.exists():
         raise FileNotFoundError(f"Missing phase prompt template: {template_path}")
+    phase_values = {
+        "{{PHASE_KEY}}": phase.key,
+        "{{PHASE_NAME}}": phase.phase,
+        "{{PHASE_LABEL}}": phase.label,
+        "{{PAPER_API_CANDIDATES_JSON}}": "[]",
+        "{{PAPER_API_COVERAGE_JSON}}": "{}",
+    }
+    if extra_values:
+        phase_values.update(extra_values)
     prompt = render_prompt_template(
         template_path.read_text(encoding="utf-8"),
         topic=topic,
@@ -487,11 +510,7 @@ def build_phase_prompt(
         output_path=output_path,
         config_path=config_path,
         preference_profile=preference_profile,
-        extra_values={
-            "{{PHASE_KEY}}": phase.key,
-            "{{PHASE_NAME}}": phase.phase,
-            "{{PHASE_LABEL}}": phase.label,
-        },
+        extra_values=phase_values,
     )
     return prompt, template_path
 
@@ -660,6 +679,30 @@ def run_newsbot_command(args: list[str]) -> int:
     return completed.returncode
 
 
+def collect_phase_4_paper_api_if_enabled(args: argparse.Namespace, *, period: str, output_path: Path) -> dict[str, Any] | None:
+    if args.disable_paper_api:
+        return None
+    result = collect_paper_api_candidates(
+        period=period,
+        retmax=paper_api_retmax(args.paper_api_retmax),
+        ncbi_api_key=os.getenv("NCBI_API_KEY", "").strip(),
+    )
+    artifact_path = phase_artifact_path(output_path, "phase_4", ".paper_api.json")
+    write_json(artifact_path, result)
+    candidate_count = len(result.get("candidates") or [])
+    log_step(f"phase_4 paper API candidates collected: candidates={candidate_count}, output={artifact_path}")
+    return result
+
+
+def phase_prompt_extra_values(phase: PhaseDefinition, paper_api_result: dict[str, Any] | None) -> dict[str, str]:
+    if phase.key != "phase_4" or paper_api_result is None:
+        return {}
+    return {
+        "{{PAPER_API_CANDIDATES_JSON}}": json.dumps(paper_api_result.get("candidates") or [], ensure_ascii=False, indent=2),
+        "{{PAPER_API_COVERAGE_JSON}}": json.dumps(paper_api_result.get("coverage") or {}, ensure_ascii=False, indent=2),
+    }
+
+
 def run_lab_automation_multi_agent(
     *,
     args: argparse.Namespace,
@@ -682,6 +725,7 @@ def run_lab_automation_multi_agent(
 
     if args.skip_codex:
         for phase in phases:
+            paper_api_result = collect_phase_4_paper_api_if_enabled(args, period=period, output_path=output_path) if phase.key == "phase_4" else None
             prompt, template_path = build_phase_prompt(
                 phase=phase,
                 topic=args.topic,
@@ -691,6 +735,7 @@ def run_lab_automation_multi_agent(
                 output_path=output_path,
                 config_path=config_path,
                 preference_profile=preference_profile,
+                extra_values=phase_prompt_extra_values(phase, paper_api_result),
             )
             prompt_path = phase_artifact_path(output_path, phase.key, ".prompt.txt")
             prompt_path.parent.mkdir(parents=True, exist_ok=True)
@@ -715,6 +760,7 @@ def run_lab_automation_multi_agent(
         return None
 
     for phase in phases:
+        paper_api_result = collect_phase_4_paper_api_if_enabled(args, period=period, output_path=output_path) if phase.key == "phase_4" else None
         prompt, template_path = build_phase_prompt(
             phase=phase,
             topic=args.topic,
@@ -724,6 +770,7 @@ def run_lab_automation_multi_agent(
             output_path=output_path,
             config_path=config_path,
             preference_profile=preference_profile,
+            extra_values=phase_prompt_extra_values(phase, paper_api_result),
         )
         prompt_path = phase_artifact_path(output_path, phase.key, ".prompt.txt")
         json_path = phase_artifact_path(output_path, phase.key, ".json")
@@ -812,6 +859,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--codex-arg", action="append", default=[], help="Extra argument passed to `codex exec`.")
     parser.add_argument("--codex-timeout", type=int, default=DEFAULT_CODEX_TIMEOUT_SECONDS)
     parser.add_argument("--single-agent", action="store_true", help="Use the legacy single-prompt workflow even for lab_automation.")
+    parser.add_argument("--disable-paper-api", action="store_true", help="Disable Phase 4 paper API collection for lab_automation multi-agent runs.")
+    parser.add_argument(
+        "--paper-api-retmax",
+        type=int,
+        default=None,
+        help="Maximum normalized paper candidates to fetch per paper API. Defaults to NEWSBOT_PAPER_API_RETMAX, then 50.",
+    )
     parser.add_argument("--phase-model", action="append", default=[], help="Model for a lab_automation phase, e.g. phase_1=gpt-5.")
     parser.add_argument("--phase-reasoning", action="append", default=[], help="Reasoning effort for a lab_automation phase, e.g. phase_1=xhigh.")
     parser.add_argument("--master-model", default="", help="Model for the lab_automation master builder. Defaults to --codex-model, then NEWSBOT_CODEX_MODEL.")

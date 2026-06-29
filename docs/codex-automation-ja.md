@@ -56,9 +56,12 @@ python scripts/generate_payload_openai.py \
 payloads/lab_automation_weekly_<timestamp>.phase_1.prompt.txt
 payloads/lab_automation_weekly_<timestamp>.phase_2.prompt.txt
 payloads/lab_automation_weekly_<timestamp>.phase_3.prompt.txt
+payloads/lab_automation_weekly_<timestamp>.phase_4.paper_api.json
 payloads/lab_automation_weekly_<timestamp>.phase_4.prompt.txt
 payloads/lab_automation_weekly_<timestamp>.master.prompt.txt
 ```
+
+Phase 4は既定で arXiv / PubMed / bioRxiv / medRxiv / Crossref APIから論文候補を取得し、候補JSONをPhase 4 promptへ埋め込みます。従来のCodex prompt-only探索に戻したい場合は、`--disable-paper-api`を指定します。
 
 ## Codexでpayloadを生成し、検証だけ行う
 
@@ -162,6 +165,8 @@ python scripts/generate_payload_openai.py \
 `.env` の `NEWSBOT_CODEX_MODEL` に設定すると、payload 生成と Discord の `Check Source` ボタンの両方で同じモデルを使います。未設定の場合は Codex CLI 側のデフォルトモデルを使います。
 
 payload生成のreasoning effortは、`.env` の `NEWSBOT_CODEX_REASONING_EFFORT` に `low`, `medium`, `high`, `xhigh` のいずれかを指定できます。`lab_automation`のmulti-agent workflowでは、Phase別に `NEWSBOT_LAB_AUTOMATION_PHASE_1_MODEL`, `NEWSBOT_LAB_AUTOMATION_PHASE_1_REASONING_EFFORT` のように設定できます。Masterは `NEWSBOT_LAB_AUTOMATION_MASTER_MODEL`, `NEWSBOT_LAB_AUTOMATION_MASTER_REASONING_EFFORT` です。
+
+Phase 4の論文API取得件数は `--paper-api-retmax` または `.env` の `NEWSBOT_PAPER_API_RETMAX` で指定できます。PubMed用の `NCBI_API_KEY` は任意です。
 
 生成時には、SQLite に保存された過去の `👍 Interested (n)` feedback からカテゴリ・タグ・ソースの傾向を抽出し、Codex へのプロンプトに含めます。Codex の出力後も同じ傾向を使って候補を並び替え、Reviewer に回す記事は優先度順の最大30本に絞ります。
 

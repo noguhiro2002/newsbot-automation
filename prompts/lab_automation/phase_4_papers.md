@@ -21,6 +21,25 @@ Audience preference profile:
 
 候補はMasterで公式発表候補と比較されます。件数合わせで低関連候補を入れないでください。0件でも構いません。
 
+## Paper API Candidate Input
+
+Python側が arXiv / PubMed / bioRxiv / medRxiv / Crossref から取得し、期間で事前filterした候補です。
+まずこの候補リストを主入力として評価してください。必要な場合だけWeb searchでcanonical URL、 DOI、出版社版、preprint重複、補足情報を確認してください。
+
+API候補が0件またはAPI取得に失敗している場合は、`paper_api_coverage` の内容を `search_coverage.limitations` に反映し、補助的なWeb検索で確認してください。
+
+### paper_api_candidates
+
+```json
+{{PAPER_API_CANDIDATES_JSON}}
+```
+
+### paper_api_coverage
+
+```json
+{{PAPER_API_COVERAGE_JSON}}
+```
+
 ## Search Priority
 
 検索は、以下の順番で行ってください。上位カテゴリほど優先度を高く評価してください。ただし、下位カテゴリにも高関連・高信頼な候補があり得るため、最低限の探索は必ず行ってください。
@@ -120,7 +139,7 @@ Audience preference profile:
 
 ## Recommended Search
 
-以下の順番で検索してください。queries_runには、実際に実行した検索語を順番どおりに記録してください。
+以下はAPI候補が不足する場合の補助検索です。queries_runには、実際に実行した検索語または確認したAPI queryを順番どおりに記録してください。
 
 ### 1. Flagship journals: Nature / Science / Cell
 
