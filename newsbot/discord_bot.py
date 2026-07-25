@@ -3,12 +3,14 @@ from __future__ import annotations
 import asyncio
 import os
 import signal
+import sys
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta
+from pathlib import Path
 from time import monotonic
 from zoneinfo import ZoneInfo
 
-from .config import DiscordSettings, load_discord_settings
+from .config import DEFAULT_CONFIG_PATH, PROJECT_ROOT, DiscordSettings, load_discord_settings
 from .db import NewsbotStore
 from .discord_client import parse_message_interval
 from .feedback import INTERESTED_EMOJI, record_interested_feedback
@@ -33,6 +35,9 @@ else:  # pragma: no cover
 WEEKLY_PUBLISH_TZ = ZoneInfo("Asia/Tokyo")
 WEEKLY_PUBLISH_DAY = 0
 WEEKLY_PUBLISH_TIME = time(hour=8, minute=0)
+DEFAULT_MANUAL_REVIEW_LOOKBACK_DAYS = 7
+STATUS_UPDATE_INTERVAL_SECONDS = 5
+STATUS_LOG_LINE_LIMIT = 10
 
 
 def next_weekly_publish_at(now: datetime | None = None) -> datetime:
@@ -50,6 +55,143 @@ def next_weekly_publish_at(now: datetime | None = None) -> datetime:
 
 def format_schedule(dt: datetime) -> str:
     return dt.astimezone(WEEKLY_PUBLISH_TZ).strftime("%Y-%m-%d %H:%M JST")
+
+
+def _manual_review_default_lookback_days() -> int:
+    raw = (
+        os.getenv("NEWSBOT_MANUAL_REVIEW_LOOKBACK_DAYS", "").strip()
+        or os.getenv("NEWSBOT_LOOKBACK_DAYS", "").strip()
+    )
+    if not raw:
+        return DEFAULT_MANUAL_REVIEW_LOOKBACK_DAYS
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_MANUAL_REVIEW_LOOKBACK_DAYS
+    return value if value > 0 else DEFAULT_MANUAL_REVIEW_LOOKBACK_DAYS
+
+
+@dataclass(frozen=True)
+class ReviewCollectionRequest:
+    topic: str = "lab_automation"
+    cadence: str = "weekly"
+    lookback_days: int = DEFAULT_MANUAL_REVIEW_LOOKBACK_DAYS
+    period: str = ""
+
+    @classmethod
+    def default(cls) -> "ReviewCollectionRequest":
+        return cls(lookback_days=_manual_review_default_lookback_days())
+
+
+def resolve_review_collection_period(
+    request: ReviewCollectionRequest,
+    now: datetime | None = None,
+) -> str:
+    if request.period.strip():
+        return request.period.strip()
+    current = (now or datetime.now(WEEKLY_PUBLISH_TZ)).astimezone(WEEKLY_PUBLISH_TZ)
+    start = current - timedelta(days=request.lookback_days)
+    return f"{start:%Y-%m-%d} to {current:%Y-%m-%d} (JST)"
+
+
+def build_review_collection_command(
+    request: ReviewCollectionRequest,
+    *,
+    python_bin: str | None = None,
+    codex_bin: str | None = None,
+    db_path: str | Path | None = None,
+    config_path: str | Path = DEFAULT_CONFIG_PATH,
+) -> list[str]:
+    command = [
+        python_bin or os.getenv("NEWSBOT_PYTHON_BIN", "").strip() or sys.executable,
+        "scripts/generate_payload_openai.py",
+        "--topic",
+        request.topic,
+        "--cadence",
+        request.cadence,
+        "--submit-review",
+        "--config",
+        str(config_path),
+    ]
+    if db_path is not None:
+        command.extend(["--db", str(db_path)])
+    if request.period.strip():
+        command.extend(["--period", request.period.strip()])
+    else:
+        command.extend(["--lookback-days", str(request.lookback_days)])
+    resolved_codex_bin = codex_bin if codex_bin is not None else os.getenv("NEWSBOT_CODEX_BIN", "").strip()
+    if resolved_codex_bin:
+        command.extend(["--codex-bin", resolved_codex_bin])
+    return command
+
+
+def format_review_collection_confirmation(request: ReviewCollectionRequest) -> str:
+    period = resolve_review_collection_period(request)
+    lines = [
+        "Manual review candidate collection",
+        "",
+        f"Topic: `{request.topic}`",
+        f"Cadence: `{request.cadence}`",
+        f"Search period: `{period}`",
+        f"Lookback days: `{request.lookback_days}`" if not request.period.strip() else "Lookback days: ignored",
+        "",
+        "Press Start to run candidate collection and submit review drafts to Discord.",
+    ]
+    return "\n".join(lines)
+
+
+def summarize_review_collection_output(lines: list[str]) -> str:
+    for line in reversed(lines):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("[newsbot-generate] "):
+            return stripped.removeprefix("[newsbot-generate] ")
+        if stripped.startswith("Submitted review drafts:"):
+            return stripped
+        if stripped.startswith("Payload OK:"):
+            return stripped
+    return "Waiting for output..."
+
+
+def format_review_collection_status(
+    request: ReviewCollectionRequest,
+    *,
+    status: str,
+    started_at: datetime,
+    command: list[str],
+    output_lines: list[str],
+    returncode: int | None = None,
+) -> str:
+    period = resolve_review_collection_period(request, started_at)
+    elapsed = datetime.now(WEEKLY_PUBLISH_TZ) - started_at
+    elapsed_seconds = max(0, int(elapsed.total_seconds()))
+    headline = f"Review candidate collection: {status}"
+    if returncode is not None:
+        headline += f" (exit={returncode})"
+    recent_lines = output_lines[-STATUS_LOG_LINE_LIMIT:]
+    recent = "\n".join(line[-180:] for line in recent_lines) or "(no output yet)"
+    content = (
+        f"{headline}\n"
+        f"Topic: `{request.topic}` / `{request.cadence}`\n"
+        f"Search period: `{period}`\n"
+        f"Elapsed: `{elapsed_seconds}s`\n"
+        f"Current step: `{summarize_review_collection_output(output_lines)}`\n"
+        "\n"
+        "Recent output:\n"
+        f"```text\n{recent}\n```"
+    )
+    if len(content) <= 1900:
+        return content
+    compact_recent = "\n".join(line[-140:] for line in recent_lines[-5:]) or "(no output yet)"
+    return (
+        f"{headline}\n"
+        f"Topic: `{request.topic}` / `{request.cadence}`\n"
+        f"Search period: `{period}`\n"
+        f"Elapsed: `{elapsed_seconds}s`\n"
+        f"Current step: `{summarize_review_collection_output(output_lines)}`\n\n"
+        f"Recent output:\n```text\n{compact_recent}\n```"
+    )
 
 
 def _parse_meta(value: str) -> tuple[str | None, list[str]]:
@@ -362,6 +504,94 @@ if discord is not None:
         async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
             await interaction.response.edit_message(content="Breaking publish cancelled.", view=None)
 
+    class ReviewCollectionModal(discord.ui.Modal, title="Manual Review Collection"):
+        def __init__(self, bot: "NewsbotDiscordBot", request: ReviewCollectionRequest, message):
+            super().__init__(timeout=300)
+            self.bot = bot
+            self.message = message
+            self.topic_input = discord.ui.TextInput(
+                label="Topic",
+                default=request.topic[:100],
+                max_length=100,
+            )
+            self.cadence_input = discord.ui.TextInput(
+                label="Cadence",
+                default=request.cadence[:40],
+                max_length=40,
+            )
+            self.lookback_input = discord.ui.TextInput(
+                label="Lookback days",
+                default=str(request.lookback_days),
+                max_length=4,
+            )
+            self.period_input = discord.ui.TextInput(
+                label="Explicit period override",
+                default=request.period[:200],
+                required=False,
+                max_length=200,
+                placeholder="Example: 2026-06-29 to 2026-07-06 (JST)",
+            )
+            self.add_item(self.topic_input)
+            self.add_item(self.cadence_input)
+            self.add_item(self.lookback_input)
+            self.add_item(self.period_input)
+
+        async def on_submit(self, interaction: discord.Interaction) -> None:
+            if not self.bot.is_allowed_guild(interaction):
+                await interaction.response.send_message("Interactions from this guild are not allowed.", ephemeral=True)
+                return
+            if not self.bot.is_reviewer(interaction.user.id):
+                await interaction.response.send_message("You are not allowed to operate reviewer controls.", ephemeral=True)
+                return
+            try:
+                lookback_days = int(self.lookback_input.value.strip())
+            except ValueError:
+                await interaction.response.send_message("Lookback days must be a positive integer.", ephemeral=True)
+                return
+            if lookback_days <= 0:
+                await interaction.response.send_message("Lookback days must be a positive integer.", ephemeral=True)
+                return
+
+            request = ReviewCollectionRequest(
+                topic=self.topic_input.value.strip() or "lab_automation",
+                cadence=self.cadence_input.value.strip() or "weekly",
+                lookback_days=lookback_days,
+                period=self.period_input.value.strip(),
+            )
+            content = format_review_collection_confirmation(request)
+            view = ReviewCollectionConfirmView(self.bot, request)
+            if self.message:
+                await self.message.edit(content=content, view=view, suppress=True)
+            await interaction.response.send_message("Review collection settings updated.", ephemeral=True)
+
+    class ReviewCollectionConfirmView(discord.ui.View):
+        def __init__(self, bot: "NewsbotDiscordBot", request: ReviewCollectionRequest):
+            super().__init__(timeout=600)
+            self.bot = bot
+            self.request = request
+
+        @discord.ui.button(label="Start", style=discord.ButtonStyle.success)
+        async def start(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+            if not await self.bot._require_reviewer(interaction):
+                return
+            await self.bot.start_review_collection(interaction, self.request)
+
+        @discord.ui.button(label="Edit", style=discord.ButtonStyle.secondary)
+        async def edit(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+            if not self.bot.is_allowed_guild(interaction):
+                await interaction.response.send_message("Interactions from this guild are not allowed.", ephemeral=True)
+                return
+            if not self.bot.is_reviewer(interaction.user.id):
+                await interaction.response.send_message("You are not allowed to operate reviewer controls.", ephemeral=True)
+                return
+            await interaction.response.send_modal(ReviewCollectionModal(self.bot, self.request, interaction.message))
+
+        @discord.ui.button(label="Cancel", style=discord.ButtonStyle.danger)
+        async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+            if not await self.bot._require_reviewer(interaction):
+                return
+            await interaction.response.edit_message(content="Manual review collection cancelled.", view=None)
+
     class EditDraftModal(discord.ui.Modal, title="Edit Review Draft"):
         def __init__(self, bot: "NewsbotDiscordBot", defaults: DraftModalDefaults):
             super().__init__(timeout=300)
@@ -454,6 +684,7 @@ if discord is not None:
             )
             self._discord_send_lock = asyncio.Lock()
             self._last_discord_send_at = 0.0
+            self._review_collection_task: asyncio.Task | None = None
 
         def is_reviewer(self, user_id: int) -> bool:
             return str(user_id) in self.settings.reviewer_user_ids
@@ -529,6 +760,10 @@ if discord is not None:
                 name="newsbot_prepare_weekly",
                 description="Post final weekly review messages now.",
             )(self._cmd_prepare_weekly)
+            self.tree.command(
+                name="newsbot_collect_reviews",
+                description="Manually collect and submit review candidate news.",
+            )(self._cmd_collect_reviews)
 
         async def on_ready(self) -> None:
             print(f"Discord bot connected as {self.user}")
@@ -717,6 +952,124 @@ if discord is not None:
                 + f"prepared={prepared}, failed={failed}, digest_preview={digest_preview}",
                 ephemeral=True,
             )
+
+        async def _cmd_collect_reviews(self, interaction: discord.Interaction) -> None:
+            if not await self._require_reviewer(interaction):
+                return
+            request = ReviewCollectionRequest.default()
+            await interaction.response.send_message(
+                format_review_collection_confirmation(request),
+                view=ReviewCollectionConfirmView(self, request),
+                ephemeral=True,
+            )
+
+        async def start_review_collection(
+            self,
+            interaction: discord.Interaction,
+            request: ReviewCollectionRequest,
+        ) -> None:
+            if self._review_collection_task and not self._review_collection_task.done():
+                await interaction.response.send_message(
+                    "Review candidate collection is already running. Check the current status message.",
+                    ephemeral=True,
+                )
+                return
+            await interaction.response.defer(ephemeral=True, thinking=True)
+            if not self.settings.review_channel_id:
+                await interaction.followup.send("DISCORD_REVIEW_CHANNEL_ID is not set.", ephemeral=True)
+                return
+
+            channel = self.get_channel(int(self.settings.review_channel_id))
+            if channel is None:
+                channel = await self.fetch_channel(int(self.settings.review_channel_id))
+
+            started_at = datetime.now(WEEKLY_PUBLISH_TZ)
+            command = build_review_collection_command(
+                request,
+                db_path=self.store.path,
+                config_path=DEFAULT_CONFIG_PATH,
+            )
+            status_message = await self.send_channel_message(
+                channel,
+                format_review_collection_status(
+                    request,
+                    status="starting",
+                    started_at=started_at,
+                    command=command,
+                    output_lines=[],
+                ),
+                suppress_embeds=True,
+            )
+            self._review_collection_task = asyncio.create_task(
+                self._run_review_collection_process(request, command, started_at, status_message)
+            )
+            self._review_collection_task.add_done_callback(self._log_background_error)
+            await interaction.followup.send(
+                f"Started review candidate collection. Status: {status_message.jump_url}",
+                ephemeral=True,
+            )
+
+        async def _run_review_collection_process(
+            self,
+            request: ReviewCollectionRequest,
+            command: list[str],
+            started_at: datetime,
+            status_message,
+        ) -> None:
+            output_lines: list[str] = []
+            last_edit_at = 0.0
+            env = os.environ.copy()
+            env["PYTHONUNBUFFERED"] = "1"
+
+            async def edit_status(status: str, returncode: int | None = None, *, force: bool = False) -> None:
+                nonlocal last_edit_at
+                current = monotonic()
+                if not force and current - last_edit_at < STATUS_UPDATE_INTERVAL_SECONDS:
+                    return
+                last_edit_at = current
+                try:
+                    await status_message.edit(
+                        content=format_review_collection_status(
+                            request,
+                            status=status,
+                            started_at=started_at,
+                            command=command,
+                            output_lines=output_lines,
+                            returncode=returncode,
+                        ),
+                        suppress=True,
+                    )
+                except Exception as exc:  # noqa: BLE001 - status edits should not stop the subprocess.
+                    print(f"newsbot: failed to update review collection status: {exc}")
+
+            try:
+                process = await asyncio.create_subprocess_exec(
+                    *command,
+                    cwd=str(PROJECT_ROOT),
+                    env=env,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT,
+                )
+            except Exception as exc:  # noqa: BLE001
+                output_lines.append(f"Could not start process: {exc}")
+                await edit_status("failed to start", returncode=1, force=True)
+                return
+
+            await edit_status("running", force=True)
+            assert process.stdout is not None
+            while True:
+                raw_line = await process.stdout.readline()
+                if not raw_line:
+                    break
+                line = raw_line.decode("utf-8", errors="replace").rstrip()
+                output_lines.append(line)
+                if len(output_lines) > 80:
+                    del output_lines[: len(output_lines) - 80]
+                await edit_status("running")
+
+            returncode = await process.wait()
+            status = "completed" if returncode == 0 else "failed"
+            await edit_status(status, returncode=returncode, force=True)
 
         async def prepare_weekly_publish(self, topic: str, cadence: str) -> tuple[int, int, int]:
             channel = self.get_channel(int(self.settings.review_channel_id))

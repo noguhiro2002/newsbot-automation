@@ -138,6 +138,8 @@ Phase 4では、Codex実行前に論文API候補を取得し、`.phase_4.paper_a
 python scripts/generate_payload_openai.py --topic lab_automation --lookback-days 3 --submit-review
 ```
 
+同じReview候補作成はDiscordからも手動実行できます。Reviewer権限のあるユーザーが `/newsbot_collect_reviews` を実行すると、検索範囲の確認画面が表示されます。`Edit` で `topic`、`cadence`、`lookback days`、明示的な `period` を修正し、`Start` を押すと `generate_payload_openai.py --submit-review` が実行されます。処理中はReviewチャンネルにStatusメッセージが投稿され、進行状況と直近ログが更新されます。
+
 `lab_automation`で従来の単一prompt方式を使う場合:
 
 ```bash
@@ -220,6 +222,7 @@ Discordで使えます。
 - `/newsbot_report`
 - `/newsbot_refresh_reviews`
 - `/newsbot_prepare_weekly`
+- `/newsbot_collect_reviews`
 
 ## 12. 動作確認
 

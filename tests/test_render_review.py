@@ -3,7 +3,16 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from newsbot.models import ArticleDraft
-from newsbot.discord_bot import format_schedule, next_weekly_publish_at, parse_review_message_for_modal
+from newsbot.discord_bot import (
+    ReviewCollectionRequest,
+    build_review_collection_command,
+    format_review_collection_confirmation,
+    format_schedule,
+    next_weekly_publish_at,
+    parse_review_message_for_modal,
+    resolve_review_collection_period,
+    summarize_review_collection_output,
+)
 from newsbot.render import (
     render_published_message,
     render_review_message,
@@ -80,6 +89,58 @@ class RenderReviewTests(unittest.TestCase):
         scheduled = next_weekly_publish_at(now)
 
         self.assertEqual(format_schedule(scheduled), "2026-06-08 08:00 JST")
+
+    def test_review_collection_period_uses_lookback_days(self):
+        request = ReviewCollectionRequest(lookback_days=21)
+        now = datetime(2026, 7, 7, 1, 0, tzinfo=ZoneInfo("Asia/Tokyo"))
+
+        self.assertEqual(resolve_review_collection_period(request, now), "2026-06-16 to 2026-07-07 (JST)")
+
+    def test_review_collection_period_override_wins(self):
+        request = ReviewCollectionRequest(lookback_days=21, period="2026-06-01 to 2026-06-30 (JST)")
+
+        self.assertEqual(resolve_review_collection_period(request), "2026-06-01 to 2026-06-30 (JST)")
+
+    def test_build_review_collection_command_uses_period_or_lookback(self):
+        request = ReviewCollectionRequest(lookback_days=14)
+        command = build_review_collection_command(
+            request,
+            python_bin="/env/bin/python",
+            codex_bin="/usr/local/bin/codex",
+            db_path="/tmp/newsbot.sqlite",
+            config_path="/tmp/config.json",
+        )
+
+        self.assertIn("--submit-review", command)
+        self.assertIn("--lookback-days", command)
+        self.assertIn("14", command)
+        self.assertIn("--codex-bin", command)
+        self.assertIn("/usr/local/bin/codex", command)
+        self.assertNotIn("--period", command)
+
+        period_command = build_review_collection_command(
+            ReviewCollectionRequest(period="2026-07-01 to 2026-07-07 (JST)"),
+            python_bin="/env/bin/python",
+            codex_bin="",
+        )
+        self.assertIn("--period", period_command)
+        self.assertNotIn("--lookback-days", period_command)
+
+    def test_review_collection_confirmation_and_summary(self):
+        request = ReviewCollectionRequest(lookback_days=7)
+        confirmation = format_review_collection_confirmation(request)
+
+        self.assertIn("Manual review candidate collection", confirmation)
+        self.assertIn("Topic: `lab_automation`", confirmation)
+        self.assertEqual(
+            summarize_review_collection_output(
+                [
+                    "[newsbot-generate] starting Codex payload generation",
+                    "[newsbot-generate] running phase_1",
+                ]
+            ),
+            "running phase_1",
+        )
 
     def test_render_published_message_variants(self):
         draft = make_draft()
