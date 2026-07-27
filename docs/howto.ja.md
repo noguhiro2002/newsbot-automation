@@ -15,7 +15,7 @@ Codex CLI:
 
 ```bash
 npm install -g @openai/codex
-codex --login
+codex login --device-auth
 codex exec --ephemeral "Say OK"
 ```
 
@@ -24,7 +24,7 @@ OpenAI公式ドキュメント:
 - [OpenAI Codex CLI getting started](https://help.openai.com/en/articles/11096431)
 - [Codex CLI sign in with ChatGPT](https://help.openai.com/en/articles/11381614-api-codex-cli-and-sign-in-with-chatgpt)
 
-## 2. Pythonアプリをインストールする
+## 2. Pythonアプリをローカルへインストールする
 
 `venv` の場合:
 
@@ -42,12 +42,14 @@ conda activate newsbot
 python -m pip install -e .
 ```
 
+Docker Composeを使う場合は、このローカル手順の代わりに[Docker Compose Install](docker-install.ja.md)を参照してください。
+
 ## 3. `.env` を設定する
 
 `.env.example` を `.env` にコピーします。
 
 ```bash
-cp .env.example .env
+install -m 600 .env.example .env
 ```
 
 設定項目:
@@ -66,7 +68,11 @@ NEWSBOT_LAB_AUTOMATION_PHASE_1_REASONING_EFFORT=
 NEWSBOT_LAB_AUTOMATION_MASTER_MODEL=
 NEWSBOT_LAB_AUTOMATION_MASTER_REASONING_EFFORT=
 NEWSBOT_PAPER_API_RETMAX=
+NEWSBOT_NCBI_TOOL=newsbot_automation
+NEWSBOT_NCBI_EMAIL=
 NCBI_API_KEY=
+NEWSBOT_CROSSREF_MAILTO=
+NEWSBOT_API_CACHE_TTL_SECONDS=21600
 NEWSBOT_LOOKBACK_DAYS=
 ```
 
@@ -80,7 +86,9 @@ NEWSBOT_LOOKBACK_DAYS=
 - `NEWSBOT_LAB_AUTOMATION_PHASE_<N>_MODEL` と `NEWSBOT_LAB_AUTOMATION_PHASE_<N>_REASONING_EFFORT` で、lab_automation multi-agent のPhase別デフォルトを指定できます。
 - `NEWSBOT_LAB_AUTOMATION_MASTER_MODEL` と `NEWSBOT_LAB_AUTOMATION_MASTER_REASONING_EFFORT` で、Master統合のデフォルトを指定できます。
 - `NEWSBOT_PAPER_API_RETMAX` はPhase 4の論文API取得件数です。空の場合は50です。
-- `NCBI_API_KEY` は任意です。未設定でもPubMed取得は動きます。
+- PubMedを使う前に、`NEWSBOT_NCBI_TOOL`と開発者の`NEWSBOT_NCBI_EMAIL`をNCBIへ登録してください。`NCBI_API_KEY`は任意です。
+- NCBIはAPIキーなしで3 request/秒、ありで10 request/秒に制限します。`NEWSBOT_CROSSREF_MAILTO`を設定するとCrossref polite poolを使います。
+- API responseは`data/api-cache/`へ`NEWSBOT_API_CACHE_TTL_SECONDS`の期間cacheします。
 - `NEWSBOT_LOOKBACK_DAYS` が空の場合は、前回成功実行時から今回実行時までを検索します。
 
 ## 4. DBを初期化する
@@ -113,13 +121,16 @@ python scripts/generate_payload_openai.py --topic lab_automation --submit-review
 4. payload を検証する。
 5. 最大30件の候補をReviewer Discordチャンネルへ投稿する。
 
-ニュース検索promptは`prompts/<topic>.md`を編集します。
-例: `--topic lab_automation`なら`prompts/lab_automation.md`、`--topic stock_news`なら`prompts/stock_news.md`です。
-該当するpromptファイルがないtopicでは、スクリプト内蔵の最小promptを使います。
+単一prompt方式のニュース検索promptは`prompts/<topic>.md`を編集します。
+例: `--topic stock_news`では`prompts/stock_news.md`を使います。該当するpromptファイルがないtopicでは、スクリプト内蔵の最小promptを使います。
 
 `lab_automation`は既定でPhase別multi-agent workflowを使います。
 Phase別promptは`prompts/lab_automation/`配下を編集します。
-`prompts/lab_automation.md`は`--single-agent`指定時のfallback promptです。
+`prompts/lab_automation.md`は`--topic lab_automation --single-agent`指定時だけ使うfallback promptです。
+
+`prompts/lab_automation/`は、現在のLab Automation運用に使うテンプレートであると同時に、別分野向けのpromptを設計する際の詳細な参考実装です。探索範囲と除外条件、Phase分割、source方針、論文API候補の選別、Feedbackの扱い、JSON出力契約を置き換えて利用してください。
+
+新しいtopicの`prompts/<topic>.md`を追加すると、通常は単一prompt方式で動作します。directoryをコピーするだけではmulti-phase workflowは有効になりません。別topicで同じPhase構成を使うには、`scripts/generate_payload_openai.py`のPhase定義とtopic分岐も拡張する必要があります。
 
 Codexを呼ばずにpromptだけ確認する場合:
 
@@ -127,10 +138,10 @@ Codexを呼ばずにpromptだけ確認する場合:
 python scripts/generate_payload_openai.py --topic lab_automation --skip-codex
 ```
 
-このコマンドで保存される`payloads/lab_automation_weekly_<YYYYMMDD_HHMMSS_microseconds>.prompt.txt`が、テンプレートに期間・保存先・設定パス・Interested feedback profileを差し込んだ後の実promptです。
-同じ日に複数回実行しても、実行時刻入りの別ファイルとして残ります。
-multi-agent workflowでは、Phase別に`.phase_1.prompt.txt`、`.phase_1.json`、`.phase_1.codex.log`、最後に`.master.*`も保存されます。
+デフォルトのmulti-phase workflowでは、実際にCodexへ渡すpromptがPhase別の`.phase_1.prompt.txt`〜`.phase_4.prompt.txt`と`.master.prompt.txt`として保存されます。`prompts/lab_automation.md`を使う`--single-agent`の場合だけ、top-levelの`.prompt.txt`が保存されます。いずれも、テンプレートへ期間・保存先・設定パス・Interested feedback profileを差し込んだ後の実promptです。
+同じ日に複数回実行しても、実行時刻入りの別ファイルとして残ります。通常実行ではPhase別に`.json`、`.codex.log`、`.codex.events.jsonl`、`.codex.usage.json`も保存されます。
 Phase 4では、Codex実行前に論文API候補を取得し、`.phase_4.paper_api.json`にも保存します。従来のprompt-only探索に戻す場合は`--disable-paper-api`を指定します。
+論文API clientはrate limitとretry/backoffを適用します。coverageやpromptへ保存するquery metadataはredactされるため、`NCBI_API_KEY`は成果物やCodexへ渡りません。PubMed利用前に[Legal Notices](legal-notices.md)を確認してください。
 
 固定日数分だけ検索する場合:
 
@@ -194,21 +205,29 @@ Botは以下の順に投稿します。
 
 Discordのリンクプレビューカードは抑制され、source URLだけが表示されます。
 
-## 10. cronで定期実行する
+## 10. Botの常駐と定期実行
 
-例: 毎週月曜 08:00 にReview候補を作成する。
+ローカル版のDiscord Botはsystemdへ登録できます。installerはserviceをその場で起動し、OS起動時の自動起動も有効化します。
 
-```cron
-0 8 * * 1 cd /path/to/newsbot-automation && /path/to/venv/bin/python scripts/generate_payload_openai.py --topic lab_automation --submit-review >> logs/newsbot-codex.log 2>&1
+```bash
+sudo scripts/install_systemd_service.sh \
+  --env venv \
+  --app-dir /opt/newsbot-automation \
+  --user newsbot \
+  --group newsbot
 ```
 
-例: 毎週金曜 16:00 にfinal review通知を出す。
+Review候補生成とfinal review準備は、付属のcron installerで登録します。
 
-```cron
-0 16 * * 5 cd /path/to/newsbot-automation && /path/to/venv/bin/python -m newsbot.cli prepare-weekly-publish >> logs/newsbot-weekly.log 2>&1
+```bash
+sudo scripts/install_cron_jobs.sh \
+  --app-dir /opt/newsbot-automation \
+  --user newsbot
 ```
 
-cronでは通常のターミナルと `PATH` が違うことがあります。Pythonは絶対パスを使い、必要に応じて `.env` の `NEWSBOT_CODEX_BIN` も絶対パスにしてください。
+現在のデフォルトは、候補生成を毎朝08:00 JSTに起動して前回成功から2日以上経過した場合だけ実行し、final reviewを毎週月曜08:00 JSTに準備する設定です。schedule、topic、cadence、Python、Codex CLIのパスは`.env`の`NEWSBOT_*`設定で変更し、変更後にinstallerを再実行してください。
+
+systemdとcronの完全な手順は[Linux Deployment](linux-deployment.md)を参照してください。Docker版ではhost側cronを併用せず、[Docker Compose Install](docker-install.ja.md)のcontainer schedulerを使用してください。
 
 ## 11. 管理用Discordコマンド
 

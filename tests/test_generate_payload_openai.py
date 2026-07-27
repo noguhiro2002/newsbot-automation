@@ -162,6 +162,47 @@ class GeneratePayloadOpenAITests(unittest.TestCase):
         self.assertIn("You are generating a Newsbot payload JSON", prompt)
         self.assertIn('"topic": "missing_topic"', prompt)
 
+    @patch("scripts.generate_payload_openai.subprocess.run")
+    def test_run_codex_uses_stdin_and_filtered_environment(self, run):
+        completed = type(
+            "Completed",
+            (),
+            {
+                "returncode": 0,
+                "stdout": '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n',
+                "stderr": "",
+            },
+        )()
+        run.return_value = completed
+        env = {
+            "PATH": "/usr/bin",
+            "HOME": "/home/newsbot",
+            "DISCORD_BOT_TOKEN": "discord-secret",
+            "NCBI_API_KEY": "ncbi-secret",
+            "X_API_KEY": "x-secret",
+        }
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(os.environ, env, clear=True):
+            log_path = Path(temp_dir) / "phase.codex.log"
+            result = run_codex(
+                codex_bin="codex",
+                codex_model="",
+                reasoning_effort="",
+                codex_args=[],
+                prompt="private prompt",
+                timeout=1,
+                log_path=log_path,
+            )
+
+        self.assertTrue(result)
+        command = run.call_args.args[0]
+        self.assertEqual(command[-1], "-")
+        self.assertNotIn("private prompt", command)
+        self.assertEqual(run.call_args.kwargs["input"], "private prompt")
+        self.assertEqual(
+            run.call_args.kwargs["env"],
+            {"PATH": "/usr/bin", "HOME": "/home/newsbot"},
+        )
+
     def test_main_skip_codex_writes_multi_agent_prompts_for_lab_automation(self):
         paper_api_result = {
             "period": "2026-05-30 to 2026-06-06 (JST)",
@@ -619,6 +660,7 @@ class GeneratePayloadOpenAITests(unittest.TestCase):
         self.assertIn("--model", command)
         self.assertIn("gpt-test", command)
         self.assertIn("--search", command)
+        self.assertIn("--json", command)
 
     def test_run_codex_does_not_duplicate_search_argument(self):
         completed = type("Completed", (), {"returncode": 0, "stdout": "", "stderr": ""})()
@@ -633,7 +675,7 @@ class GeneratePayloadOpenAITests(unittest.TestCase):
                 codex_bin="codex",
                 codex_model="",
                 reasoning_effort="",
-                codex_args=["--search"],
+                codex_args=["--search", "--json"],
                 prompt="prompt",
                 timeout=1,
                 log_path=Path(temp_dir) / "codex.log",
@@ -642,6 +684,38 @@ class GeneratePayloadOpenAITests(unittest.TestCase):
         command = run.call_args.args[0]
         self.assertEqual(command[:3], ["codex", "--search", "exec"])
         self.assertEqual(command.count("--search"), 1)
+        self.assertEqual(command.count("--json"), 1)
+
+    def test_run_codex_can_disable_search_for_controlled_evaluation(self):
+        completed = type("Completed", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+        def fake_run(command, **kwargs):
+            output_index = command.index("--output-last-message") + 1
+            Path(command[output_index]).write_text(
+                '{"topic":"lab_automation","cadence":"weekly","period":"x","items":[]}',
+                encoding="utf-8",
+            )
+            return completed
+
+        with tempfile.TemporaryDirectory() as temp_dir, patch(
+            "scripts.generate_payload_openai.subprocess.run",
+            side_effect=fake_run,
+        ) as run:
+            run_codex(
+                codex_bin="codex",
+                codex_model="",
+                reasoning_effort="",
+                codex_args=["--search"],
+                prompt="prompt",
+                timeout=1,
+                log_path=Path(temp_dir) / "codex.log",
+                enable_search=False,
+            )
+
+        command = run.call_args.args[0]
+        self.assertEqual(command[:2], ["codex", "exec"])
+        self.assertNotIn("--search", command)
+        self.assertIn("--json", command)
 
     def test_run_codex_passes_reasoning_effort_config(self):
         completed = type("Completed", (), {"returncode": 0, "stdout": "", "stderr": ""})()
@@ -665,6 +739,63 @@ class GeneratePayloadOpenAITests(unittest.TestCase):
         command = run.call_args.args[0]
         self.assertEqual(command[:4], ["codex", "--search", "--config", 'model_reasoning_effort="xhigh"'])
         self.assertIn("exec", command)
+
+    def test_run_codex_writes_jsonl_events_and_usage_summary(self):
+        stdout = "\n".join(
+            [
+                json.dumps({"type": "thread.started", "thread_id": "thread-1"}),
+                json.dumps(
+                    {
+                        "type": "item.completed",
+                        "item": {"type": "agent_message", "text": '{"items":[]}'},
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "turn.completed",
+                        "usage": {
+                            "input_tokens": 1000,
+                            "cached_input_tokens": 600,
+                            "output_tokens": 200,
+                            "reasoning_output_tokens": 50,
+                        },
+                    }
+                ),
+            ]
+        )
+        completed = type("Completed", (), {"returncode": 0, "stdout": stdout, "stderr": ""})()
+
+        def fake_run(command, **kwargs):
+            output_index = command.index("--output-last-message") + 1
+            Path(command[output_index]).write_text('{"items":[]}', encoding="utf-8")
+            return completed
+
+        with tempfile.TemporaryDirectory() as temp_dir, patch(
+            "scripts.generate_payload_openai.subprocess.run", side_effect=fake_run
+        ):
+            log_path = Path(temp_dir) / "sample.phase_1.codex.log"
+            output = run_codex(
+                codex_bin="codex",
+                codex_model="gpt-5.6-luna",
+                reasoning_effort="high",
+                codex_args=[],
+                prompt="prompt",
+                timeout=1,
+                log_path=log_path,
+            )
+            events_path = Path(temp_dir) / "sample.phase_1.codex.events.jsonl"
+            usage_path = Path(temp_dir) / "sample.phase_1.codex.usage.json"
+
+            self.assertEqual(output, '{"items":[]}')
+            self.assertEqual(events_path.read_text(encoding="utf-8"), stdout)
+            summary = json.loads(usage_path.read_text(encoding="utf-8"))
+            self.assertTrue(summary["complete"])
+            self.assertEqual(summary["usage"]["input_tokens"], 1000)
+            self.assertEqual(summary["usage"]["cached_input_tokens"], 600)
+            self.assertEqual(summary["usage"]["non_cached_input_tokens"], 400)
+            self.assertEqual(summary["usage"]["output_tokens"], 200)
+            self.assertEqual(summary["usage"]["reasoning_output_tokens"], 50)
+            self.assertEqual(summary["usage"]["total_tokens"], 1200)
 
 
 if __name__ == "__main__":

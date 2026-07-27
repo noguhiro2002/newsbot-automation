@@ -36,6 +36,8 @@ WEEKLY_PUBLISH_TZ = ZoneInfo("Asia/Tokyo")
 WEEKLY_PUBLISH_DAY = 0
 WEEKLY_PUBLISH_TIME = time(hour=8, minute=0)
 DEFAULT_MANUAL_REVIEW_LOOKBACK_DAYS = 7
+DEFAULT_REVIEW_TOPIC = "lab_automation"
+DEFAULT_REVIEW_CADENCE = "weekly"
 STATUS_UPDATE_INTERVAL_SECONDS = 5
 STATUS_LOG_LINE_LIMIT = 10
 
@@ -71,16 +73,32 @@ def _manual_review_default_lookback_days() -> int:
     return value if value > 0 else DEFAULT_MANUAL_REVIEW_LOOKBACK_DAYS
 
 
+def default_review_topic() -> str:
+    return os.getenv("NEWSBOT_REVIEW_TOPIC", "").strip() or os.getenv(
+        "NEWSBOT_GENERATE_REVIEW_TOPIC", ""
+    ).strip() or DEFAULT_REVIEW_TOPIC
+
+
+def default_review_cadence() -> str:
+    return os.getenv("NEWSBOT_REVIEW_CADENCE", "").strip() or os.getenv(
+        "NEWSBOT_GENERATE_REVIEW_CADENCE", ""
+    ).strip() or DEFAULT_REVIEW_CADENCE
+
+
 @dataclass(frozen=True)
 class ReviewCollectionRequest:
-    topic: str = "lab_automation"
-    cadence: str = "weekly"
+    topic: str = DEFAULT_REVIEW_TOPIC
+    cadence: str = DEFAULT_REVIEW_CADENCE
     lookback_days: int = DEFAULT_MANUAL_REVIEW_LOOKBACK_DAYS
     period: str = ""
 
     @classmethod
     def default(cls) -> "ReviewCollectionRequest":
-        return cls(lookback_days=_manual_review_default_lookback_days())
+        return cls(
+            topic=default_review_topic(),
+            cadence=default_review_cadence(),
+            lookback_days=_manual_review_default_lookback_days(),
+        )
 
 
 def resolve_review_collection_period(
@@ -553,8 +571,8 @@ if discord is not None:
                 return
 
             request = ReviewCollectionRequest(
-                topic=self.topic_input.value.strip() or "lab_automation",
-                cadence=self.cadence_input.value.strip() or "weekly",
+                topic=self.topic_input.value.strip() or default_review_topic(),
+                cadence=self.cadence_input.value.strip() or default_review_cadence(),
                 lookback_days=lookback_days,
                 period=self.period_input.value.strip(),
             )
@@ -894,7 +912,12 @@ if discord is not None:
         async def _cmd_weekly_queue(self, interaction: discord.Interaction) -> None:
             if not await self._defer_admin_command(interaction):
                 return
-            drafts = await self.db_call(self.store.list_approved_weekly, "lab_automation", "weekly", 20)
+            drafts = await self.db_call(
+                self.store.list_approved_weekly,
+                default_review_topic(),
+                default_review_cadence(),
+                20,
+            )
             await interaction.followup.send(
                 self._format_draft_list("Approved weekly drafts:", drafts),
                 ephemeral=True,
@@ -943,7 +966,10 @@ if discord is not None:
             if not await self._defer_admin_command(interaction):
                 return
             try:
-                prepared, failed, digest_preview = await self.prepare_weekly_publish("lab_automation", "weekly")
+                prepared, failed, digest_preview = await self.prepare_weekly_publish(
+                    default_review_topic(),
+                    default_review_cadence(),
+                )
             except Exception as exc:  # noqa: BLE001
                 await interaction.followup.send(f"Could not prepare weekly final review: {exc}", ephemeral=True)
                 return

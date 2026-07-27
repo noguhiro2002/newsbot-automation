@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sqlite3
 import uuid
 from contextlib import contextmanager
@@ -37,8 +38,17 @@ class NewsbotStore:
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        try:
+            self.path.parent.chmod(0o700)
+        except OSError:
+            pass
         conn = sqlite3.connect(self.path)
+        try:
+            os.chmod(self.path, 0o600)
+        except OSError:
+            conn.close()
+            raise
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
         try:

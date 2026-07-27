@@ -1,74 +1,84 @@
 # Security Review
 
-Date: 2026-06-07
+Date: 2026-07-28
 
 ## Scope
 
-Repository-wide review of the public-release `newsbot` codebase:
+Repository-wide public-release review covering:
 
-- Codex CLI payload generation
-- Discord Bot review and publish workflow
-- SQLite draft/review/feedback storage
-- Legacy webhook/X notification helpers
-- Local secret scanning and release-readiness files
+- Codex CLI candidate collection, selection, and source checks
+- Paper API retrieval from arXiv, PubMed, bioRxiv, medRxiv, and Crossref
+- Discord human-review and publish workflow
+- SQLite draft, review, delivery, and feedback storage
+- Local, systemd, cron, Docker Compose, and CI operation
+- Current files and all Git history intended to remain reachable after release
 
-## Threat Model Summary
+## Trust Boundaries
 
-Important assets:
+- Web pages, paper metadata, and Codex output are untrusted input.
+- Payloads are schema/config validated and deterministically ranked before storage.
+- Discord reviewer actions are limited to configured user IDs and, when set, one
+  guild.
+- Weekly publication requires final human decisions and an explicit
+  `Publish Digest` interaction.
+- `.env`, Codex authentication, SQLite, payloads, prompts, logs, reports, API
+  caches, and scan output are private operational data.
 
-- `DISCORD_BOT_TOKEN`
-- `DISCORD_REVIEW_CHANNEL_ID`
-- `DISCORD_PUBLISH_CHANNEL_ID`
-- `DISCORD_REVIEWER_USER_IDS`
-- Optional `DISCORD_WEBHOOK_URL`
-- Optional X credentials
-- Codex CLI local authentication state
-- Local SQLite operational data
+## Implemented Controls
 
-Trust boundaries:
-
-- Codex-generated payloads are untrusted until validation and human review.
-- Discord interactions are accepted only from configured reviewers, and optionally one guild.
-- Public publishing requires a reviewer to click `Publish Digest`.
-- SQLite data, generated payloads, Codex logs, and reports are local operational data and must not be committed.
-
-## Checks Performed
-
-- Confirmed SQL access uses parameterized queries.
-- Confirmed reviewer controls check `DISCORD_REVIEWER_USER_IDS`.
-- Confirmed optional guild restriction uses `DISCORD_ALLOWED_GUILD_ID`.
-- Confirmed generated review/publish content suppresses Discord link previews.
-- Confirmed source-check and payload-generation subprocess calls invoke Codex CLI without shell command interpolation.
-- Confirmed `.gitignore` excludes `.env`, generated DBs, payloads, reports, scans, and backup files.
-- Confirmed `scripts/private_repo_check.py` scans common text/config extensions for obvious credentials.
-
-## Current Findings
-
-No high- or critical-severity vulnerabilities were found in the reviewed code paths.
+- Codex prompts are sent on standard input, not command-line arguments.
+- Codex child processes receive an allowlisted environment. Discord, X, and
+  NCBI credentials are not inherited.
+- Codex runs with Web search enabled. The application does not force a Codex
+  sandbox because that mode has not been accepted as compatible with the
+  required Web-search behavior in every deployment.
+- NCBI API keys are used only for HTTP requests and are redacted from coverage,
+  cache keys, prompts, errors, and Codex input.
+- Paper API clients apply identification, rate limiting, bounded retry/backoff,
+  persistent cache expiry, period filtering, and duplicate removal.
+- SQL uses parameterized statements. Runtime umask and file modes restrict local
+  secrets, SQLite, generated artifacts, and systemd-created files to the service
+  owner.
+- Docker dependencies are locked, the base image is digest-pinned, and runtime
+  services use a read-only root filesystem, dropped capabilities,
+  `no-new-privileges`, resource limits, and per-service secret assignment.
+- CI compiles and tests Python, validates shell/Compose/Markdown, audits Python
+  dependencies, builds an image with provenance/SBOM, and scans the image.
+- `scripts/private_repo_check.py` checks tracked and untracked release files,
+  compares against live local credentials without printing them, and scans all
+  reachable Git history for secrets and forbidden runtime paths.
 
 ## Residual Risks
 
-- Codex-generated article text can include inaccurate or adversarial web content. Keep human review before publishing.
-- Codex CLI credentials live outside this repository and must be protected by the host OS user account.
-- A compromised host or CI runner can read runtime environment variables.
-- SQLite stores message text, URLs, review history, and feedback. Treat it as operational data, not source code.
-- Legacy webhook/X delivery remains available. Prefer the Discord Bot review pipeline for public deployments.
+- Prompt injection and inaccurate Web content remain possible because Codex must
+  be able to search the Web and is not forced into a sandbox. Keep human review,
+  inspect source URLs, and run Codex under a dedicated low-privilege OS user or
+  container.
+- Codex necessarily has access to its own authentication state and any explicitly
+  allowlisted OpenAI authentication variables.
+- A compromised host, Docker daemon, CI runner, or service account can access
+  runtime secrets and operational data.
+- API metadata and abstracts can be copyrighted or subject to provider terms.
+  Follow the [Legal Notices](legal-notices.md).
+- SQLite is a single-host store. Do not run multiple bot replicas against the
+  same database volume, and protect backups as sensitive operational data.
+- Legacy webhook/X delivery remains available and carries additional credentials.
+  Prefer the Discord Bot review workflow.
 
-## Public Release Checklist
+## Public Release Gate
 
-Run before publishing:
+Run from the repository root:
 
 ```bash
 python scripts/private_repo_check.py
-git ls-files .env data payloads reports security-scans "*.sqlite" "*.db"
-python -m compileall newsbot tests scripts
+python scripts/check_markdown_links.py
+python -m compileall -q newsbot tests scripts
 python -m unittest discover -s tests
+bash -n scripts/*.sh
+docker compose config --quiet
 ```
 
-Expected:
-
-- Secret scan prints no findings.
-- `git ls-files` does not list `.env`, generated data, payloads, reports, scans, or database files.
-- Compile and test checks pass.
-
-If a live secret was ever committed, revoke and rotate it at the provider. Removing it from a later commit is not enough.
+The release is blocked unless every command succeeds. In particular, the
+repository checker must pass after history cleanup; deleting a secret only from
+the working tree is insufficient. Revoke and rotate any credential that was ever
+exposed outside its intended environment.

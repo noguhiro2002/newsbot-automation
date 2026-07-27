@@ -362,7 +362,7 @@ site:plos.org "self-driving laboratory"
 2. 自律性・閉ループ性
 
    * 実験計画、実験実行、測定、解析、次条件提案が閉ループになっているか
-   * 人間が都度判断する単発自動化より、adaptive / autonomous / closed-loopを高発自動化より、adaptive / autonomousく評価
+   * 人間が都度判断する単発自動化より、adaptive / autonomous / closed-loopな実験系を高く評価
 
 3. 実装実体
 

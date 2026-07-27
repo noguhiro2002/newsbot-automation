@@ -9,14 +9,17 @@ __pycache__/
 *.bak
 
 # Local runtime artifacts
-data/
-payloads/
+data/*
+payloads/*
 reports/
 security-scans/
-logs/
+logs/*
+analysis/
 *.sqlite
 *.sqlite3
 *.db
+.codex/
+.agents/
 
 # Never track copied Git internals at the repository root.
 /COMMIT_EDITMSG

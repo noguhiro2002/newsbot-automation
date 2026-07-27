@@ -16,9 +16,14 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from newsbot.config import DEFAULT_CONFIG_PATH, load_config, resolve_project_path
+from newsbot.codex_env import codex_subprocess_env
 from newsbot.db import DEFAULT_DB_PATH, NewsbotStore
 from newsbot.models import NewsPayload
-from newsbot.paper_api import collect_paper_api_candidates
+from newsbot.paper_api import (
+    DEFAULT_API_CACHE_TTL_SECONDS,
+    collect_paper_api_candidates,
+    redact_sensitive_values,
+)
 from newsbot.ranking import REVIEW_MAX_ITEMS, rank_news_items
 
 
@@ -591,42 +596,67 @@ def run_codex(
     prompt: str,
     timeout: int,
     log_path: Path,
+    enable_search: bool = True,
 ) -> str:
     with tempfile.NamedTemporaryFile("w+", encoding="utf-8", delete=False, suffix=".md") as handle:
         output_last_message = Path(handle.name)
 
     model_args = ["--model", codex_model] if codex_model else []
     reasoning_args = ["--config", f'model_reasoning_effort="{reasoning_effort}"'] if reasoning_effort else []
-    exec_args = [arg for arg in codex_args if arg != "--search"]
+    exec_args = [arg for arg in codex_args if arg not in {"--search", "--json"}]
+    search_args = ["--search"] if enable_search else []
     command = [
         codex_bin,
-        "--search",
+        *search_args,
         *reasoning_args,
         "exec",
+        "--json",
         "--ephemeral",
         "--output-last-message",
         str(output_last_message),
         *model_args,
         *exec_args,
-        prompt,
+        "-",
     ]
     result = subprocess.run(
         command,
         cwd=PROJECT_ROOT,
-        stdin=subprocess.DEVNULL,
+        input=prompt,
         capture_output=True,
         text=True,
         timeout=timeout,
         check=False,
+        env=codex_subprocess_env(),
+    )
+    events_path = codex_sibling_artifact_path(log_path, ".codex.events.jsonl")
+    usage_path = codex_sibling_artifact_path(log_path, ".codex.usage.json")
+    events, usage, parse_errors = parse_codex_jsonl(result.stdout)
+    events_path.parent.mkdir(parents=True, exist_ok=True)
+    events_path.write_text(result.stdout, encoding="utf-8")
+    write_json(
+        usage_path,
+        {
+            "model": codex_model or None,
+            "reasoning_effort": reasoning_effort or None,
+            "exit_code": result.returncode,
+            "complete": result.returncode == 0 and usage is not None,
+            "event_count": len(events),
+            "parse_error_count": parse_errors,
+            "usage": usage,
+            "events_path": str(events_path),
+        },
     )
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.write_text(
         "\n".join(
             [
                 "COMMAND:",
-                " ".join(command[:-1] + ["<prompt>"]),
+                " ".join(command[:-1] + ["<prompt-from-stdin>"]),
                 "",
                 f"EXIT_CODE: {result.returncode}",
+                "",
+                f"JSONL_EVENTS_PATH: {events_path}",
+                f"USAGE_SUMMARY_PATH: {usage_path}",
                 "",
                 "STDOUT:",
                 result.stdout,
@@ -641,7 +671,70 @@ def run_codex(
     output_last_message.unlink(missing_ok=True)
     if result.returncode != 0:
         raise RuntimeError(f"codex exec failed with exit code {result.returncode}; see {log_path}")
-    return output or result.stdout
+    return output or final_agent_message(events) or result.stdout
+
+
+def codex_sibling_artifact_path(log_path: Path, suffix: str) -> Path:
+    marker = ".codex.log"
+    name = log_path.name
+    base = name[: -len(marker)] if name.endswith(marker) else log_path.stem
+    return log_path.with_name(base + suffix)
+
+
+def parse_codex_jsonl(text: str) -> tuple[list[dict[str, Any]], dict[str, int] | None, int]:
+    events: list[dict[str, Any]] = []
+    parse_errors = 0
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            parse_errors += 1
+            continue
+        if isinstance(event, dict):
+            events.append(event)
+        else:
+            parse_errors += 1
+
+    completed_usage = [
+        event.get("usage")
+        for event in events
+        if event.get("type") == "turn.completed" and isinstance(event.get("usage"), dict)
+    ]
+    if not completed_usage:
+        return events, None, parse_errors
+
+    usage_keys = (
+        "input_tokens",
+        "cached_input_tokens",
+        "output_tokens",
+        "reasoning_output_tokens",
+    )
+    usage = {
+        key: sum(int(item.get(key) or 0) for item in completed_usage)
+        for key in usage_keys
+    }
+    usage["non_cached_input_tokens"] = max(
+        usage["input_tokens"] - usage["cached_input_tokens"], 0
+    )
+    usage["total_tokens"] = usage["input_tokens"] + usage["output_tokens"]
+    return events, usage, parse_errors
+
+
+def final_agent_message(events: list[dict[str, Any]]) -> str:
+    messages: list[str] = []
+    for event in events:
+        item = event.get("item")
+        if (
+            event.get("type") == "item.completed"
+            and isinstance(item, dict)
+            and item.get("type") == "agent_message"
+            and isinstance(item.get("text"), str)
+        ):
+            messages.append(item["text"])
+    return messages[-1].strip() if messages else ""
 
 
 def validate_payload_dict(payload: dict[str, Any], *, config_path: Path) -> NewsPayload:
@@ -682,11 +775,22 @@ def run_newsbot_command(args: list[str]) -> int:
 def collect_phase_4_paper_api_if_enabled(args: argparse.Namespace, *, period: str, output_path: Path) -> dict[str, Any] | None:
     if args.disable_paper_api:
         return None
-    result = collect_paper_api_candidates(
+    cache_dir_value = os.getenv(
+        "NEWSBOT_API_CACHE_DIR", str(PROJECT_ROOT / "data" / "api-cache")
+    ).strip()
+    cache_ttl_value = os.getenv(
+        "NEWSBOT_API_CACHE_TTL_SECONDS", str(DEFAULT_API_CACHE_TTL_SECONDS)
+    ).strip()
+    result = redact_sensitive_values(collect_paper_api_candidates(
         period=period,
         retmax=paper_api_retmax(args.paper_api_retmax),
         ncbi_api_key=os.getenv("NCBI_API_KEY", "").strip(),
-    )
+        ncbi_tool=os.getenv("NEWSBOT_NCBI_TOOL", "").strip(),
+        ncbi_email=os.getenv("NEWSBOT_NCBI_EMAIL", "").strip(),
+        crossref_mailto=os.getenv("NEWSBOT_CROSSREF_MAILTO", "").strip(),
+        cache_dir=cache_dir_value or None,
+        cache_ttl_seconds=int(cache_ttl_value),
+    ))
     artifact_path = phase_artifact_path(output_path, "phase_4", ".paper_api.json")
     write_json(artifact_path, result)
     candidate_count = len(result.get("candidates") or [])
@@ -884,6 +988,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    os.umask(0o077)
     load_env_file()
     args = build_parser().parse_args(argv)
     log_step("starting Codex payload generation")

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+umask 077
 
 usage() {
   cat <<'USAGE'
@@ -126,6 +127,14 @@ if ! runuser -u "$run_user" -g "$run_group" -- "$python_bin" -c 'import sys' >/d
   exit 1
 fi
 
+chown "$run_user:$run_group" "$app_dir/.env"
+chmod 0600 "$app_dir/.env"
+for runtime_dir in data logs payloads reports; do
+  install -d -m 0700 -o "$run_user" -g "$run_group" "$app_dir/$runtime_dir"
+  chown -R "$run_user:$run_group" "$app_dir/$runtime_dir"
+  chmod -R go-rwx "$app_dir/$runtime_dir"
+done
+
 service_path="/etc/systemd/system/${service_name}.service"
 tmp_file="$(mktemp)"
 
@@ -140,6 +149,7 @@ Type=simple
 WorkingDirectory=$app_dir
 EnvironmentFile=$app_dir/.env
 Environment=PYTHONUNBUFFERED=1
+UMask=0077
 ExecStart=$python_bin -m newsbot.cli run-discord-bot
 Restart=always
 RestartSec=10

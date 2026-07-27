@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .codex_env import codex_subprocess_env
 from .config import PROJECT_ROOT
 
 
@@ -124,21 +125,23 @@ def check_source_with_codex(
 
     command = [
         codex_command,
+        "--search",
         "exec",
         "--ephemeral",
         "--output-last-message",
         str(output_path),
         *model_args,
-        prompt,
+        "-",
     ]
     result = subprocess.run(
         command,
         cwd=PROJECT_ROOT,
-        stdin=subprocess.DEVNULL,
+        input=prompt,
         capture_output=True,
         text=True,
         timeout=timeout,
         check=False,
+        env=codex_subprocess_env(),
     )
     output = output_path.read_text(encoding="utf-8", errors="replace").strip()
     output_path.unlink(missing_ok=True)

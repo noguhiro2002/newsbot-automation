@@ -126,7 +126,7 @@ PR TIMES、PR Newswire、Business Wire、GlobeNewswireなどを広告として�
 
 ## Recommended Search
 
-以下の順番で検索してください。`{{PERIOD}}` が明示されている場合は、検索語に年・月・期間表現を加えてください。例: `2026`, `"June 2026"`, `"past week"` など。
+以下の順番で検索してください。`{{PERIOD}}` が明示されている場合は、その期間から年・月を読み取り、対応する日本語・英語の期間表現を検索語へ加えてください。実行時の対象期間と異なる年を固定的に使わないでください。
 
 ### 1. Domestic PR distribution: PR TIMES
 
@@ -577,7 +577,7 @@ site:<organization-domain> 研究データ基盤
 ## Output Field Notes
 
 * `source_type` は、公式URLに解決できた場合は `"official"` としてください。
-* 公式URLが見つからずPR配信ページのみをcanonical sourceにした場合は、既存スキーマ互換性を優先するなら `"official"` のままにし、`evidence` に `PR distribution page used because no official page was found` と明記してください。スキーマ変更が許される場合のみ `"pr_distribution"` を使ってください。
+* 公式URLが見つからずPR配信ページのみをcanonical sourceにした場合は、`source_type`を `"press_release"` とし、`evidence` に `PR distribution page used because no official page was found` と明記してください。
 * `source` は、canonical sourceの発行主体名にしてください。PR配信ページをcanonical sourceにした場合でも、可能な限り発表主体名を入れ、配信サービス名だけにしないでください。
 * `url` は、公式URLに解決できた場合は公式URL、解決できなかった場合のみPR配信URLにしてください。
 * `evidence` には、発見元がPR配信ページだったこと、公式URLを確認したか、なぜcanonical sourceとして採用したかを簡潔に書いてください。

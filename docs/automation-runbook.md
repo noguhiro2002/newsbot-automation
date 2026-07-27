@@ -4,23 +4,27 @@ This runbook describes the recommended public operation model: cron starts Codex
 
 ## Recommended Schedule
 
-- News search and review submission: run `scripts/generate_payload_openai.py` with cron.
-- Final weekly review notification: run `python -m newsbot.cli prepare-weekly-publish` with cron or manually.
+- News search and review submission: run the `generate-review` scheduled task.
+- Final weekly review notification: run the `prepare-weekly` scheduled task or prepare it manually.
 - Public publish: click `Publish Digest` in Discord after final review.
 
-Example review-candidate cron:
+For a local installation, register the current schedules through the included installer:
 
-```cron
-0 8 * * 1 cd /path/to/newsbot-automation && /path/to/venv/bin/python scripts/generate_payload_openai.py --topic lab_automation --submit-review >> logs/newsbot-codex.log 2>&1
+```bash
+sudo scripts/install_cron_jobs.sh \
+  --app-dir /opt/newsbot-automation \
+  --user newsbot
 ```
 
-Example final-review cron:
+By default, candidate generation is triggered every day at 08:00 JST and runs only if the previous successful run was at least two days ago. Final-review preparation runs every Monday at 08:00 JST. Configure the `NEWSBOT_GENERATE_REVIEW_*` and `NEWSBOT_PREPARE_WEEKLY_*` values in `.env`, then rerun the installer.
 
-```cron
-0 16 * * 5 cd /path/to/newsbot-automation && /path/to/venv/bin/python -m newsbot.cli prepare-weekly-publish >> logs/newsbot-weekly.log 2>&1
+For Docker Compose, use its scheduler instead of host cron:
+
+```bash
+docker compose --profile scheduler up -d
 ```
 
-Cron often has a limited `PATH`. Use absolute Python paths and set `NEWSBOT_CODEX_BIN` in `.env` if cron cannot find `codex`.
+Do not run host cron and the Docker scheduler together.
 
 ## Runtime Processes
 
@@ -31,6 +35,23 @@ python -m newsbot.cli run-discord-bot
 ```
 
 The bot handles reviewer controls, edit modals, source checks, final ordering, publishing, and reader feedback.
+
+For a local Linux installation, keep it running and enable it at OS boot with:
+
+```bash
+sudo scripts/install_systemd_service.sh \
+  --env venv \
+  --app-dir /opt/newsbot-automation \
+  --user newsbot \
+  --group newsbot
+```
+
+For Docker Compose, `discord-bot` uses `restart: unless-stopped`. Enable Docker Engine at boot and create the service once:
+
+```bash
+sudo systemctl enable --now containerd.service docker.service
+docker compose up -d discord-bot
+```
 
 ## Payload Contract
 
@@ -66,6 +87,14 @@ python -m newsbot.cli submit-review --input samples/lab_automation_weekly.sample
 - Keep human review in Discord before `Publish Digest`.
 - Treat Codex-generated payloads as untrusted until validation and review.
 - Keep `.env`, `data/`, `payloads/`, `reports/`, and SQLite files out of Git.
+- Keep `.env` and SQLite files mode `0600`, and runtime directories mode `0700`.
+- Configure registered NCBI tool/email values before PubMed use. Keep
+  `NCBI_API_KEY` private and follow the documented provider rate limits.
+- Codex subprocesses intentionally receive only allowlisted runtime/OpenAI
+  variables; Discord, X, and NCBI credentials are excluded.
+- Codex Web search is required and the application does not force a sandbox.
+  Run generation under a dedicated low-privilege account or hardened container,
+  and retain human source review.
 
 ## Manual Test Checklist
 

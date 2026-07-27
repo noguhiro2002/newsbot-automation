@@ -1,14 +1,26 @@
 import json
+import stat
+import tempfile
 import unittest
 from datetime import date
+from pathlib import Path
+from unittest.mock import patch
 
 from newsbot.paper_api import (
+    ApiRequestContext,
     PaperCandidate,
+    RequestRateLimiter,
+    api_cache_path,
     collect_paper_api_candidates,
     dedupe_candidates,
+    fetch_pubmed_candidates,
+    fetch_url,
     parse_arxiv_atom,
     parse_period_dates,
     parse_pubmed_xml,
+    redact_sensitive_text,
+    redact_sensitive_url,
+    redact_sensitive_values,
 )
 
 
@@ -27,6 +39,114 @@ class FakeResponse:
 
 
 class PaperApiTests(unittest.TestCase):
+    def test_redacts_sensitive_query_parameters_and_nested_values(self):
+        url = "https://example.com/items?term=lab&api_key=dummy&token=dummy"
+
+        redacted_url = redact_sensitive_url(url)
+        redacted_values = redact_sensitive_values(
+            {"coverage": {"url": url}, "api_key": "dummy"}
+        )
+
+        self.assertNotIn("dummy", redacted_url)
+        self.assertNotIn("dummy", json.dumps(redacted_values))
+        self.assertEqual(redacted_values["api_key"], "<redacted>")
+
+    def test_redacts_sensitive_query_parameters_from_error_text(self):
+        text = "request failed: https://example.com?api_key=dummy&term=lab"
+
+        self.assertNotIn("dummy", redact_sensitive_text(text))
+
+    def test_pubmed_sends_key_but_records_only_redacted_url(self):
+        requested_urls = []
+        coverage = {"api_queries_run": []}
+
+        def fake_opener(request, timeout=20):
+            requested_urls.append(request.full_url)
+            return FakeResponse(json.dumps({"esearchresult": {"idlist": []}}))
+
+        context = ApiRequestContext(
+            cache_dir=None,
+            cache_ttl_seconds=0,
+            max_retries=0,
+            ncbi_limiter=RequestRateLimiter(1000),
+            crossref_limiter=RequestRateLimiter(1000),
+        )
+        fetch_pubmed_candidates(
+            date(2026, 6, 22),
+            date(2026, 6, 29),
+            1,
+            20,
+            fake_opener,
+            coverage,
+            "dummy",
+            "newsbot_automation",
+            "developer@example.com",
+            context,
+        )
+
+        self.assertIn("api_key=dummy", requested_urls[0])
+        recorded = coverage["api_queries_run"][0]["url"]
+        self.assertNotIn("dummy", recorded)
+        self.assertNotIn("developer%40example.com", recorded)
+        self.assertIn("api_key=%3Credacted%3E", recorded)
+        self.assertIn("tool=newsbot_automation", recorded)
+        self.assertIn("email=%3Credacted%3E", recorded)
+
+    def test_api_cache_key_and_file_do_not_contain_api_key(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache_dir = Path(temp_dir)
+            url = "https://example.com/items?api_key=dummy&term=lab"
+            context = ApiRequestContext(
+                cache_dir=cache_dir,
+                cache_ttl_seconds=60,
+                max_retries=0,
+                ncbi_limiter=RequestRateLimiter(1000),
+                crossref_limiter=RequestRateLimiter(1000),
+            )
+
+            body = fetch_url(
+                url,
+                20,
+                lambda request, timeout=20: FakeResponse("cached"),
+                context=context,
+            )
+            path = api_cache_path(cache_dir, url)
+
+            self.assertEqual(body, b"cached")
+            self.assertTrue(path.exists())
+            self.assertNotIn("dummy", path.name)
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+
+    def test_retryable_http_error_is_retried(self):
+        calls = 0
+
+        def flaky_opener(request, timeout=20):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                from urllib.error import HTTPError
+
+                raise HTTPError(request.full_url, 429, "rate limited", {}, None)
+            return FakeResponse("ok")
+
+        context = ApiRequestContext(
+            cache_dir=None,
+            cache_ttl_seconds=0,
+            max_retries=1,
+            ncbi_limiter=RequestRateLimiter(1000),
+            crossref_limiter=RequestRateLimiter(1000),
+        )
+        with patch("newsbot.paper_api.time.sleep"):
+            body = fetch_url(
+                "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/test",
+                20,
+                flaky_opener,
+                context=context,
+            )
+
+        self.assertEqual(body, b"ok")
+        self.assertEqual(calls, 2)
+
     def test_parse_period_dates(self):
         start, end = parse_period_dates("2026-06-22 to 2026-06-29 (JST)")
 

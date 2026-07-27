@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+umask 077
 
 usage() {
   cat <<'USAGE'
@@ -59,6 +60,9 @@ load_env_file() {
 }
 
 load_env_file "$env_file"
+if [[ -f "$env_file" ]]; then
+  chmod 0600 "$env_file"
+fi
 
 if [[ -n "${NEWSBOT_CODEX_BIN:-}" ]]; then
   codex_bin_dir="$(dirname "$NEWSBOT_CODEX_BIN")"
@@ -124,7 +128,8 @@ if [[ ! -x "$python_bin" ]]; then
   exit 1
 fi
 
-mkdir -p "$state_dir"
+mkdir -p -m 0700 "$state_dir"
+chmod 0700 "$state_dir"
 
 run_smoke_test() {
   echo "task=$task"
@@ -204,7 +209,9 @@ run_generate_review() {
 }
 
 run_prepare_weekly() {
-  local lock_file
+  local topic cadence lock_file
+  topic="${NEWSBOT_GENERATE_REVIEW_TOPIC:-lab_automation}"
+  cadence="${NEWSBOT_GENERATE_REVIEW_CADENCE:-weekly}"
   lock_file="$state_dir/prepare-weekly.lock"
 
   (
@@ -213,7 +220,9 @@ run_prepare_weekly() {
       exit 0
     }
     cd "$app_dir"
-    "$python_bin" -m newsbot.cli prepare-weekly-publish
+    "$python_bin" -m newsbot.cli prepare-weekly-publish \
+      --topic "$topic" \
+      --cadence "$cadence"
   ) 9>"$lock_file"
 }
 

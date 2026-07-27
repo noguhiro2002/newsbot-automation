@@ -164,7 +164,7 @@ Audience preference profile:
 
 ## Recommended Search
 
-以下の順番で検索してください。`{{PERIOD}}` が明示されている場合は、検索語に年・月・期間表現を加えてください。例: `2026`, `"June 2026"`, `"past week"` など。
+以下の順番で検索してください。`{{PERIOD}}` が明示されている場合は、その期間から年・月を読み取り、対応する期間表現を検索語へ加えてください。実行時の対象期間と異なる年を固定的に使わないでください。
 
 ### 1. Standards / interoperability / data standards
 
@@ -224,7 +224,7 @@ site:nfdi4chem.de "FAIR data" "chemistry" "laboratory"
 ### 2. Societies / conferences / exhibitions
 
 ```text
-site:slas.org "laboratory automation" "2026"
+site:slas.org "laboratory automation"
 site:slas.org "AI" "laboratory automation"
 site:slas.org "robotics" "laboratory automation"
 site:slas.org "SLAS Technology" "automation"

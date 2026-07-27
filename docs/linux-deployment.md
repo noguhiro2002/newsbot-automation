@@ -51,6 +51,15 @@ sudo useradd --system --home /opt/newsbot-automation --shell /usr/sbin/nologin n
 sudo chown -R newsbot:newsbot /opt/newsbot-automation
 ```
 
+The runtime user must also have access to the Codex CLI binary and its authentication state. Authenticate the dedicated user before installing the service:
+
+```bash
+sudo -u newsbot -H codex login --device-auth
+sudo -u newsbot -H codex exec --ephemeral "Say OK"
+```
+
+Alternatively, install the service under an existing Linux user that already has working Codex CLI authentication.
+
 ### For `venv`
 
 ```bash
@@ -82,10 +91,19 @@ Adjust `--python-bin` if your Conda installation path is different.
 
 ```bash
 sudo systemctl status newsbot-discord-bot
+sudo systemctl is-enabled newsbot-discord-bot
 sudo systemctl restart newsbot-discord-bot
 sudo systemctl stop newsbot-discord-bot
 sudo journalctl -u newsbot-discord-bot -f
 ```
+
+The installer runs `systemctl enable --now`, so the Bot starts immediately and starts automatically at every OS boot. `systemctl stop` only stops the current run; because the unit remains enabled, it starts again at the next boot. To disable boot-time startup explicitly:
+
+```bash
+sudo systemctl disable --now newsbot-discord-bot
+```
+
+The systemd service keeps only the Discord Bot process running. Candidate generation and final-review preparation are separate scheduled jobs; install the cron jobs described below if they should continue automatically after reboot.
 
 ## Manual systemd Unit Templates
 
@@ -117,6 +135,7 @@ EnvironmentFile=/opt/newsbot-automation/.env
 ExecStart=/opt/newsbot-automation/.venv/bin/python -m newsbot.cli run-discord-bot
 Restart=always
 RestartSec=10
+UMask=0077
 User=newsbot
 Group=newsbot
 
@@ -140,6 +159,7 @@ EnvironmentFile=/opt/newsbot-automation/.env
 ExecStart=/opt/miniconda3/envs/newsbot/bin/python -m newsbot.cli run-discord-bot
 Restart=always
 RestartSec=10
+UMask=0077
 User=newsbot
 Group=newsbot
 

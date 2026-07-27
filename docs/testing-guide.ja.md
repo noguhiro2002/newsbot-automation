@@ -6,10 +6,27 @@
 
 リポジトリのルートで実行します。
 
+自動testにはCodex標準入力呼び出しとcredential分離、論文APIのredaction・
+cache権限・retry、Docker schedulerとhealthcheckも含まれます。
+
 ```bash
+uv sync --frozen --all-extras
 python -m compileall newsbot tests scripts
 python -m unittest discover -s tests
 ```
+
+CIと同じ公開前checkも実行します。
+
+```bash
+python scripts/private_repo_check.py
+python scripts/check_markdown_links.py
+bash -n scripts/*.sh
+docker compose config --quiet
+docker compose build
+```
+
+repository checkerは現在のtracked/untracked公開対象だけでなく、到達可能な
+Git履歴全体も検査します。
 
 CLI の基本動作も確認できます。
 

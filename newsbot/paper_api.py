@@ -1,13 +1,18 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import re
+import time
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 from dataclasses import asdict, dataclass
 from datetime import date, datetime
+from pathlib import Path
 from typing import Any, Callable
+from urllib.error import HTTPError, URLError
 
 
 DEFAULT_PAPER_QUERIES = [
@@ -25,6 +30,20 @@ DEFAULT_PAPER_QUERIES = [
 
 USER_AGENT = "newsbot-automation/0.2 (+https://github.com/noguhiro2002/newsbot-automation)"
 UrlOpen = Callable[..., Any]
+SENSITIVE_QUERY_PARAMETERS = frozenset(
+    {
+        "access_token",
+        "api_key",
+        "apikey",
+        "email",
+        "key",
+        "mailto",
+        "secret",
+        "token",
+    }
+)
+RETRYABLE_HTTP_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
+DEFAULT_API_CACHE_TTL_SECONDS = 6 * 60 * 60
 
 
 @dataclass(frozen=True)
@@ -40,6 +59,46 @@ class PaperCandidate:
     api_source: str
     matched_query: str
     raw_categories: list[str]
+
+
+class RequestRateLimiter:
+    def __init__(
+        self,
+        requests_per_second: float,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], None] = time.sleep,
+    ):
+        self.minimum_interval = 1.0 / max(0.1, requests_per_second)
+        self.clock = clock
+        self.sleep = sleep
+        self._last_request_at: float | None = None
+
+    def wait(self) -> None:
+        now = self.clock()
+        if self._last_request_at is not None:
+            remaining = self.minimum_interval - (now - self._last_request_at)
+            if remaining > 0:
+                self.sleep(remaining)
+                now = self.clock()
+        self._last_request_at = now
+
+
+@dataclass
+class ApiRequestContext:
+    cache_dir: Path | None
+    cache_ttl_seconds: int
+    max_retries: int
+    ncbi_limiter: RequestRateLimiter
+    crossref_limiter: RequestRateLimiter
+
+    def limiter_for(self, url: str) -> RequestRateLimiter | None:
+        hostname = (urllib.parse.urlsplit(url).hostname or "").lower()
+        if hostname == "eutils.ncbi.nlm.nih.gov":
+            return self.ncbi_limiter
+        if hostname == "api.crossref.org":
+            return self.crossref_limiter
+        return None
 
 
 def parse_period_dates(period: str) -> tuple[date, date]:
@@ -58,12 +117,25 @@ def collect_paper_api_candidates(
     period: str,
     retmax: int = 50,
     ncbi_api_key: str = "",
+    ncbi_tool: str = "",
+    ncbi_email: str = "",
+    crossref_mailto: str = "",
     timeout: int = 20,
     opener: UrlOpen | None = None,
+    cache_dir: str | Path | None = None,
+    cache_ttl_seconds: int = DEFAULT_API_CACHE_TTL_SECONDS,
 ) -> dict[str, Any]:
     start_date, end_date = parse_period_dates(period)
     limit = max(1, retmax)
     fetcher = opener or urllib.request.urlopen
+    production_requests = opener is None
+    request_context = ApiRequestContext(
+        cache_dir=Path(cache_dir) if cache_dir else None,
+        cache_ttl_seconds=max(0, cache_ttl_seconds),
+        max_retries=3 if production_requests else 0,
+        ncbi_limiter=RequestRateLimiter(10 if ncbi_api_key else 3),
+        crossref_limiter=RequestRateLimiter(10 if crossref_mailto else 5),
+    )
     coverage: dict[str, Any] = {
         "period": period,
         "start_date": start_date.isoformat(),
@@ -76,17 +148,48 @@ def collect_paper_api_candidates(
 
     candidates: list[PaperCandidate] = []
     collectors = [
-        ("arxiv", lambda: fetch_arxiv_candidates(start_date, end_date, limit, timeout, fetcher, coverage)),
-        ("pubmed", lambda: fetch_pubmed_candidates(start_date, end_date, limit, timeout, fetcher, coverage, ncbi_api_key)),
-        ("biorxiv", lambda: fetch_biorxiv_family_candidates("biorxiv", start_date, end_date, limit, timeout, fetcher, coverage)),
-        ("medrxiv", lambda: fetch_biorxiv_family_candidates("medrxiv", start_date, end_date, limit, timeout, fetcher, coverage)),
-        ("crossref", lambda: fetch_crossref_candidates(start_date, end_date, limit, timeout, fetcher, coverage)),
+        ("arxiv", lambda: fetch_arxiv_candidates(start_date, end_date, limit, timeout, fetcher, coverage, request_context)),
+        (
+            "pubmed",
+            lambda: fetch_pubmed_candidates(
+                start_date,
+                end_date,
+                limit,
+                timeout,
+                fetcher,
+                coverage,
+                ncbi_api_key,
+                ncbi_tool,
+                ncbi_email,
+                request_context,
+            ),
+        ),
+        (
+            "biorxiv",
+            lambda: fetch_biorxiv_family_candidates(
+                "biorxiv", start_date, end_date, limit, timeout, fetcher, coverage, request_context
+            ),
+        ),
+        (
+            "medrxiv",
+            lambda: fetch_biorxiv_family_candidates(
+                "medrxiv", start_date, end_date, limit, timeout, fetcher, coverage, request_context
+            ),
+        ),
+        (
+            "crossref",
+            lambda: fetch_crossref_candidates(
+                start_date, end_date, limit, timeout, fetcher, coverage, crossref_mailto, request_context
+            ),
+        ),
     ]
     for api_name, collect in collectors:
         try:
             candidates.extend(collect())
         except Exception as exc:  # noqa: BLE001 - API failures should not stop Phase 4.
-            coverage["api_failures"].append({"api_source": api_name, "error": str(exc)})
+            coverage["api_failures"].append(
+                {"api_source": api_name, "error": redact_sensitive_text(str(exc))}
+            )
 
     deduped = dedupe_candidates(filter_candidates_by_period(candidates, start_date, end_date))
     coverage["candidate_count_before_dedupe"] = len(candidates)
@@ -109,6 +212,7 @@ def fetch_arxiv_candidates(
     timeout: int,
     opener: UrlOpen,
     coverage: dict[str, Any],
+    request_context: ApiRequestContext,
 ) -> list[PaperCandidate]:
     candidates: list[PaperCandidate] = []
     per_query_limit = max(1, min(10, retmax))
@@ -124,8 +228,8 @@ def fetch_arxiv_candidates(
             "sortOrder": "descending",
         }
         url = "https://export.arxiv.org/api/query?" + urllib.parse.urlencode(params)
-        coverage["api_queries_run"].append({"api_source": "arxiv", "query": query, "url": url})
-        body = fetch_url(url, timeout, opener)
+        record_api_query(coverage, api_source="arxiv", query=query, url=url)
+        body = fetch_url(url, timeout, opener, context=request_context)
         candidates.extend(parse_arxiv_atom(body, query))
     return candidates[:retmax]
 
@@ -170,7 +274,14 @@ def fetch_pubmed_candidates(
     opener: UrlOpen,
     coverage: dict[str, Any],
     ncbi_api_key: str,
+    ncbi_tool: str,
+    ncbi_email: str,
+    request_context: ApiRequestContext,
 ) -> list[PaperCandidate]:
+    if not ncbi_tool.strip() or not ncbi_email.strip():
+        raise ValueError(
+            "PubMed requires registered NEWSBOT_NCBI_TOOL and NEWSBOT_NCBI_EMAIL values"
+        )
     ids: list[str] = []
     per_query_limit = max(1, min(10, retmax))
     for query in DEFAULT_PAPER_QUERIES:
@@ -179,25 +290,37 @@ def fetch_pubmed_candidates(
         term = f'"{query}" AND ("{start_date:%Y/%m/%d}"[Date - Publication] : "{end_date:%Y/%m/%d}"[Date - Publication])'
         params = {
             "db": "pubmed",
+            "email": ncbi_email.strip(),
             "term": term,
+            "tool": ncbi_tool.strip(),
             "retmode": "json",
             "retmax": str(per_query_limit),
         }
         if ncbi_api_key:
             params["api_key"] = ncbi_api_key
         url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?" + urllib.parse.urlencode(params)
-        coverage["api_queries_run"].append({"api_source": "pubmed", "query": query, "url": url})
-        data = json.loads(fetch_url(url, timeout, opener).decode("utf-8", errors="replace"))
+        record_api_query(coverage, api_source="pubmed", query=query, url=url)
+        data = json.loads(
+            fetch_url(url, timeout, opener, context=request_context).decode(
+                "utf-8", errors="replace"
+            )
+        )
         ids.extend(data.get("esearchresult", {}).get("idlist", []))
     ids = list(dict.fromkeys(ids))[:retmax]
     if not ids:
         return []
-    params = {"db": "pubmed", "id": ",".join(ids), "retmode": "xml"}
+    params = {
+        "db": "pubmed",
+        "email": ncbi_email.strip(),
+        "id": ",".join(ids),
+        "retmode": "xml",
+        "tool": ncbi_tool.strip(),
+    }
     if ncbi_api_key:
         params["api_key"] = ncbi_api_key
     url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?" + urllib.parse.urlencode(params)
-    coverage["api_queries_run"].append({"api_source": "pubmed", "query": "efetch", "url": url})
-    return parse_pubmed_xml(fetch_url(url, timeout, opener))
+    record_api_query(coverage, api_source="pubmed", query="efetch", url=url)
+    return parse_pubmed_xml(fetch_url(url, timeout, opener, context=request_context))
 
 
 def parse_pubmed_xml(body: bytes | str) -> list[PaperCandidate]:
@@ -251,13 +374,20 @@ def fetch_biorxiv_family_candidates(
     timeout: int,
     opener: UrlOpen,
     coverage: dict[str, Any],
+    request_context: ApiRequestContext,
 ) -> list[PaperCandidate]:
     cursor = 0
     candidates: list[PaperCandidate] = []
     while len(candidates) < retmax:
         url = f"https://api.biorxiv.org/details/{server}/{start_date.isoformat()}/{end_date.isoformat()}/{cursor}"
-        coverage["api_queries_run"].append({"api_source": server, "query": f"{server} details", "url": url})
-        data = json.loads(fetch_url(url, timeout, opener).decode("utf-8", errors="replace"))
+        record_api_query(
+            coverage, api_source=server, query=f"{server} details", url=url
+        )
+        data = json.loads(
+            fetch_url(url, timeout, opener, context=request_context).decode(
+                "utf-8", errors="replace"
+            )
+        )
         collection = data.get("collection") or []
         if not collection:
             break
@@ -301,6 +431,8 @@ def fetch_crossref_candidates(
     timeout: int,
     opener: UrlOpen,
     coverage: dict[str, Any],
+    crossref_mailto: str,
+    request_context: ApiRequestContext,
 ) -> list[PaperCandidate]:
     candidates: list[PaperCandidate] = []
     per_query_limit = max(1, min(10, retmax))
@@ -314,9 +446,15 @@ def fetch_crossref_candidates(
             "sort": "published",
             "order": "desc",
         }
+        if crossref_mailto.strip():
+            params["mailto"] = crossref_mailto.strip()
         url = "https://api.crossref.org/works?" + urllib.parse.urlencode(params)
-        coverage["api_queries_run"].append({"api_source": "crossref", "query": query, "url": url})
-        data = json.loads(fetch_url(url, timeout, opener).decode("utf-8", errors="replace"))
+        record_api_query(coverage, api_source="crossref", query=query, url=url)
+        data = json.loads(
+            fetch_url(url, timeout, opener, context=request_context).decode(
+                "utf-8", errors="replace"
+            )
+        )
         for item in data.get("message", {}).get("items", []):
             candidate = crossref_item_to_candidate(item, query)
             if candidate:
@@ -346,10 +484,133 @@ def crossref_item_to_candidate(item: dict[str, Any], query: str) -> PaperCandida
     )
 
 
-def fetch_url(url: str, timeout: int, opener: UrlOpen) -> bytes:
+def fetch_url(
+    url: str,
+    timeout: int,
+    opener: UrlOpen,
+    *,
+    context: ApiRequestContext | None = None,
+) -> bytes:
+    cache_path = api_cache_path(context.cache_dir, url) if context and context.cache_dir else None
+    if cache_path and context:
+        cached = read_api_cache(cache_path, context.cache_ttl_seconds)
+        if cached is not None:
+            return cached
+
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    with opener(request, timeout=timeout) as response:
-        return response.read()
+    max_retries = context.max_retries if context else 0
+    limiter = context.limiter_for(url) if context else None
+    for attempt in range(max_retries + 1):
+        if limiter:
+            limiter.wait()
+        try:
+            with opener(request, timeout=timeout) as response:
+                body = response.read()
+            if cache_path:
+                write_api_cache(cache_path, body)
+            return body
+        except HTTPError as exc:
+            if exc.code not in RETRYABLE_HTTP_STATUS_CODES or attempt >= max_retries:
+                raise
+            retry_after = parse_retry_after(exc.headers.get("Retry-After"))
+        except (TimeoutError, URLError):
+            if attempt >= max_retries:
+                raise
+            retry_after = 0.0
+        time.sleep(max(retry_after, min(30.0, float(2**attempt))))
+    raise RuntimeError("API request retry loop exited unexpectedly")
+
+
+def record_api_query(
+    coverage: dict[str, Any], *, api_source: str, query: str, url: str
+) -> None:
+    coverage["api_queries_run"].append(
+        {
+            "api_source": api_source,
+            "query": query,
+            "url": redact_sensitive_url(url),
+        }
+    )
+
+
+def redact_sensitive_url(url: str) -> str:
+    parts = urllib.parse.urlsplit(url)
+    redacted_query = urllib.parse.urlencode(
+        [
+            (
+                key,
+                "<redacted>" if key.lower() in SENSITIVE_QUERY_PARAMETERS else value,
+            )
+            for key, value in urllib.parse.parse_qsl(
+                parts.query, keep_blank_values=True
+            )
+        ]
+    )
+    return urllib.parse.urlunsplit(
+        (parts.scheme, parts.netloc, parts.path, redacted_query, parts.fragment)
+    )
+
+
+def redact_sensitive_text(value: str) -> str:
+    return re.sub(
+        r"(?i)([?&](?:access_token|api_?key|apikey|email|key|mailto|secret|token)=)"
+        r"[^&\s]+",
+        r"\1<redacted>",
+        value,
+    )
+
+
+def redact_sensitive_values(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: (
+                "<redacted>"
+                if str(key).lower() in SENSITIVE_QUERY_PARAMETERS
+                else redact_sensitive_values(item)
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [redact_sensitive_values(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(redact_sensitive_values(item) for item in value)
+    if isinstance(value, str):
+        return redact_sensitive_text(value)
+    return value
+
+
+def api_cache_path(cache_dir: Path, url: str) -> Path:
+    cache_key = hashlib.sha256(
+        redact_sensitive_url(url).encode("utf-8")
+    ).hexdigest()
+    return cache_dir / f"{cache_key}.response"
+
+
+def read_api_cache(path: Path, ttl_seconds: int) -> bytes | None:
+    if ttl_seconds <= 0 or not path.is_file():
+        return None
+    if time.time() - path.stat().st_mtime > ttl_seconds:
+        return None
+    return path.read_bytes()
+
+
+def write_api_cache(path: Path, body: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        path.parent.chmod(0o700)
+    except OSError:
+        pass
+    path.write_bytes(body)
+    os.chmod(path, 0o600)
+
+
+def parse_retry_after(value: str | None) -> float:
+    if not value:
+        return 0.0
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        return 0.0
 
 
 def filter_candidates_by_period(candidates: list[PaperCandidate], start_date: date, end_date: date) -> list[PaperCandidate]:

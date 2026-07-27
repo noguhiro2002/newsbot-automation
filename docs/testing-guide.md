@@ -14,6 +14,9 @@ Automated tests cover:
 - Message rendering
 - CLI flows for `validate-payload`, `submit-review`, `prepare-weekly-publish`, Codex payload generation, and legacy `notify`
 - Mocked Discord REST posting without real network calls
+- Codex standard-input invocation and child-process credential isolation
+- Paper API redaction, cache permissions, and retry behavior
+- Docker scheduler and container health-check helpers
 
 Manual Discord tests cover:
 
@@ -33,9 +36,23 @@ Manual Discord tests cover:
 From the repository root:
 
 ```bash
+uv sync --frozen --all-extras
 python -m compileall newsbot tests scripts
 python -m unittest discover -s tests
 ```
+
+Run the same public-release checks used by CI:
+
+```bash
+python scripts/private_repo_check.py
+python scripts/check_markdown_links.py
+bash -n scripts/*.sh
+docker compose config --quiet
+docker compose build
+```
+
+The repository checker intentionally scans all reachable Git history as well as
+the current tracked and untracked release files.
 
 You can also test the basic CLI path:
 

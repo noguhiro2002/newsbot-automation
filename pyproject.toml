@@ -6,9 +6,33 @@ build-backend = "setuptools.build_meta"
 name = "newsbot"
 version = "0.2.0"
 description = "Topic-based Codex CLI news reviewer and Discord publishing pipeline"
+readme = "README.md"
+license = "MIT"
+authors = [
+  { name = "noguhiro2002" },
+]
 requires-python = ">=3.11"
 dependencies = [
-  "discord.py>=2.4.0",
+  "discord.py>=2.7.1,<3.0.0",
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+]
+
+[project.urls]
+Homepage = "https://github.com/noguhiro2002/newsbot-automation"
+Issues = "https://github.com/noguhiro2002/newsbot-automation/issues"
+Repository = "https://github.com/noguhiro2002/newsbot-automation"
+
+[project.optional-dependencies]
+analysis = [
+  "seaborn>=0.13.2,<0.14.0",
+]
+docker = [
+  "croniter>=6.0.0,<7.0.0",
 ]
 
 [project.scripts]

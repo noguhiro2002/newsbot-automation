@@ -1,0 +1,12 @@
+Newsbot Automation
+Copyright (c) 2026 noguhiro2002
+
+The source code is distributed under the MIT License.
+
+This distribution can interoperate with third-party services and can display
+third-party trademarks. Discord, Python, OpenAI/Codex, NCBI/PubMed, and
+Crossref are owned by their respective organizations. Their inclusion does not
+imply affiliation or endorsement. Data retrieved from third-party services is
+not relicensed by the Newsbot Automation MIT License.
+
+See docs/legal-notices.md for service-specific notices.

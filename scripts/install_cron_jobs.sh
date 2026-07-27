@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+umask 077
 
 usage() {
   cat <<'USAGE'
@@ -178,11 +179,13 @@ if [[ "$dry_run" -eq 0 ]]; then
     exit 1
   fi
 
-  mkdir -p "$app_dir/logs" "$state_dir"
+  mkdir -p -m 0700 "$app_dir/logs" "$state_dir"
   touch "$codex_log" "$weekly_log"
+  chmod 0700 "$app_dir/logs" "$state_dir"
+  chmod 0600 "$env_file" "$codex_log" "$weekly_log"
   if [[ "$cron_user" != "root" ]]; then
     cron_group="$(id -gn "$cron_user")"
-    chown "$cron_user:$cron_group" "$app_dir/logs" "$codex_log" "$weekly_log" "$state_dir"
+    chown "$cron_user:$cron_group" "$env_file" "$app_dir/logs" "$codex_log" "$weekly_log" "$state_dir"
   fi
 fi
 

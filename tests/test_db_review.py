@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+import stat
 from pathlib import Path
 
 from newsbot.db import NewsbotStore
@@ -51,6 +52,11 @@ class ReviewDbTests(unittest.TestCase):
         self.assertEqual(updated.category_primary, "automation")
         self.assertEqual(updated.source_url, "https://example.com/robotics-updated?utm_campaign=review")
         self.assertEqual(updated.canonical_url, "https://example.com/robotics-updated")
+
+    def test_database_file_is_owner_readable_and_writable_only(self):
+        mode = stat.S_IMODE(self.db_path.stat().st_mode)
+
+        self.assertEqual(mode, 0o600)
 
     def test_check_source_updates_source_url(self):
         item = NewsItem(

@@ -90,6 +90,32 @@ class SourceCheckTests(unittest.TestCase):
         self.assertIn("--model", command)
         self.assertIn("gpt-test", command)
 
+    def test_codex_uses_stdin_and_does_not_inherit_application_credentials(self):
+        completed = type("Completed", (), {"returncode": 0, "stdout": '{"status": "ok"}', "stderr": ""})()
+        env = {
+            "PATH": "/usr/bin",
+            "HOME": "/home/newsbot",
+            "DISCORD_BOT_TOKEN": "discord-secret",
+            "NCBI_API_KEY": "ncbi-secret",
+            "X_API_KEY": "x-secret",
+        }
+
+        with patch.dict(os.environ, env, clear=True), patch("newsbot.source_check.subprocess.run") as run:
+            run.return_value = completed
+            check_source_with_codex(
+                title="Example title",
+                current_url="https://example.com/old",
+                timeout=1,
+            )
+
+        self.assertEqual(run.call_args.args[0][-1], "-")
+        self.assertEqual(run.call_args.args[0][:3], ["codex", "--search", "exec"])
+        self.assertIn("Example title", run.call_args.kwargs["input"])
+        self.assertEqual(
+            run.call_args.kwargs["env"],
+            {"PATH": "/usr/bin", "HOME": "/home/newsbot"},
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

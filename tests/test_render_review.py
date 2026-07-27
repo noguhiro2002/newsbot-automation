@@ -1,11 +1,15 @@
+import os
 import unittest
 from datetime import datetime
 from zoneinfo import ZoneInfo
+from unittest.mock import patch
 
 from newsbot.models import ArticleDraft
 from newsbot.discord_bot import (
     ReviewCollectionRequest,
     build_review_collection_command,
+    default_review_cadence,
+    default_review_topic,
     format_review_collection_confirmation,
     format_schedule,
     next_weekly_publish_at,
@@ -141,6 +145,22 @@ class RenderReviewTests(unittest.TestCase):
             ),
             "running phase_1",
         )
+
+    def test_review_defaults_are_configurable(self):
+        with patch.dict(
+            os.environ,
+            {
+                "NEWSBOT_REVIEW_TOPIC": "stock_news",
+                "NEWSBOT_REVIEW_CADENCE": "daily",
+            },
+            clear=False,
+        ):
+            request = ReviewCollectionRequest.default()
+            self.assertEqual(default_review_topic(), "stock_news")
+            self.assertEqual(default_review_cadence(), "daily")
+
+        self.assertEqual(request.topic, "stock_news")
+        self.assertEqual(request.cadence, "daily")
 
     def test_render_published_message_variants(self):
         draft = make_draft()
