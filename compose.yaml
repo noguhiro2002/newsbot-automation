@@ -1,0 +1,179 @@
+x-common-environment: &common-environment
+  NEWSBOT_APP_DIR: /app
+  NEWSBOT_CODEX_BIN: /usr/local/bin/codex
+  NEWSBOT_CRON_STATE_DIR: /app/data/cron
+  NEWSBOT_PYTHON_BIN: /opt/newsbot-venv/bin/python
+  TZ: ${NEWSBOT_CRON_TZ:-Asia/Tokyo}
+
+x-discord-environment: &discord-environment
+  DISCORD_ALLOWED_GUILD_ID: ${DISCORD_ALLOWED_GUILD_ID:-}
+  DISCORD_BOT_TOKEN: ${DISCORD_BOT_TOKEN:-}
+  DISCORD_PUBLISH_CHANNEL_ID: ${DISCORD_PUBLISH_CHANNEL_ID:-}
+  DISCORD_REVIEW_CHANNEL_ID: ${DISCORD_REVIEW_CHANNEL_ID:-}
+  DISCORD_REVIEWER_USER_IDS: ${DISCORD_REVIEWER_USER_IDS:-}
+  NEWSBOT_DISCORD_MESSAGE_INTERVAL_SECONDS: ${NEWSBOT_DISCORD_MESSAGE_INTERVAL_SECONDS:-1}
+  NEWSBOT_MANUAL_REVIEW_LOOKBACK_DAYS: ${NEWSBOT_MANUAL_REVIEW_LOOKBACK_DAYS:-7}
+  NEWSBOT_REVIEW_CADENCE: ${NEWSBOT_REVIEW_CADENCE:-weekly}
+  NEWSBOT_REVIEW_TOPIC: ${NEWSBOT_REVIEW_TOPIC:-lab_automation}
+
+x-codex-environment: &codex-environment
+  NEWSBOT_CODEX_MODEL: ${NEWSBOT_CODEX_MODEL:-}
+  NEWSBOT_CODEX_REASONING_EFFORT: ${NEWSBOT_CODEX_REASONING_EFFORT:-}
+  NEWSBOT_LAB_AUTOMATION_MASTER_MODEL: ${NEWSBOT_LAB_AUTOMATION_MASTER_MODEL:-}
+  NEWSBOT_LAB_AUTOMATION_MASTER_REASONING_EFFORT: ${NEWSBOT_LAB_AUTOMATION_MASTER_REASONING_EFFORT:-}
+  NEWSBOT_LAB_AUTOMATION_PHASE_1_MODEL: ${NEWSBOT_LAB_AUTOMATION_PHASE_1_MODEL:-}
+  NEWSBOT_LAB_AUTOMATION_PHASE_1_REASONING_EFFORT: ${NEWSBOT_LAB_AUTOMATION_PHASE_1_REASONING_EFFORT:-}
+  NEWSBOT_LAB_AUTOMATION_PHASE_2_MODEL: ${NEWSBOT_LAB_AUTOMATION_PHASE_2_MODEL:-}
+  NEWSBOT_LAB_AUTOMATION_PHASE_2_REASONING_EFFORT: ${NEWSBOT_LAB_AUTOMATION_PHASE_2_REASONING_EFFORT:-}
+  NEWSBOT_LAB_AUTOMATION_PHASE_3_MODEL: ${NEWSBOT_LAB_AUTOMATION_PHASE_3_MODEL:-}
+  NEWSBOT_LAB_AUTOMATION_PHASE_3_REASONING_EFFORT: ${NEWSBOT_LAB_AUTOMATION_PHASE_3_REASONING_EFFORT:-}
+  NEWSBOT_LAB_AUTOMATION_PHASE_4_MODEL: ${NEWSBOT_LAB_AUTOMATION_PHASE_4_MODEL:-}
+  NEWSBOT_LAB_AUTOMATION_PHASE_4_REASONING_EFFORT: ${NEWSBOT_LAB_AUTOMATION_PHASE_4_REASONING_EFFORT:-}
+
+x-generation-environment: &generation-environment
+  NCBI_API_KEY: ${NCBI_API_KEY:-}
+  NEWSBOT_API_CACHE_DIR: /app/data/api-cache
+  NEWSBOT_API_CACHE_TTL_SECONDS: ${NEWSBOT_API_CACHE_TTL_SECONDS:-21600}
+  NEWSBOT_CROSSREF_MAILTO: ${NEWSBOT_CROSSREF_MAILTO:-}
+  NEWSBOT_GENERATE_REVIEW_CADENCE: ${NEWSBOT_GENERATE_REVIEW_CADENCE:-weekly}
+  NEWSBOT_GENERATE_REVIEW_CRON: ${NEWSBOT_GENERATE_REVIEW_CRON:-0 8 * * *}
+  NEWSBOT_GENERATE_REVIEW_EVERY_DAYS: ${NEWSBOT_GENERATE_REVIEW_EVERY_DAYS:-2}
+  NEWSBOT_GENERATE_REVIEW_TOPIC: ${NEWSBOT_GENERATE_REVIEW_TOPIC:-lab_automation}
+  NEWSBOT_LOOKBACK_DAYS: ${NEWSBOT_LOOKBACK_DAYS:-}
+  NEWSBOT_NCBI_EMAIL: ${NEWSBOT_NCBI_EMAIL:-}
+  NEWSBOT_NCBI_TOOL: ${NEWSBOT_NCBI_TOOL:-newsbot_automation}
+  NEWSBOT_PAPER_API_RETMAX: ${NEWSBOT_PAPER_API_RETMAX:-50}
+  NEWSBOT_PREPARE_WEEKLY_CRON: ${NEWSBOT_PREPARE_WEEKLY_CRON:-0 8 * * 1}
+
+x-newsbot-common: &newsbot-common
+  build:
+    context: .
+    args:
+      CODEX_VERSION: ${NEWSBOT_CODEX_CLI_VERSION:-0.145.0}
+      NEWSBOT_GID: ${NEWSBOT_DOCKER_GID:-10001}
+      NEWSBOT_UID: ${NEWSBOT_DOCKER_UID:-10001}
+      UV_VERSION: ${NEWSBOT_UV_VERSION:-0.11.9}
+  image: newsbot-automation:${NEWSBOT_IMAGE_TAG:-local}
+  init: true
+  working_dir: /app
+  read_only: true
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  pids_limit: ${NEWSBOT_DOCKER_PIDS_LIMIT:-256}
+  mem_limit: ${NEWSBOT_DOCKER_MEMORY_LIMIT:-1g}
+  cpus: ${NEWSBOT_DOCKER_CPU_LIMIT:-1.0}
+  tmpfs:
+    - /tmp:size=64m,mode=1777
+  logging:
+    driver: local
+    options:
+      max-size: ${NEWSBOT_DOCKER_LOG_MAX_SIZE:-10m}
+      max-file: ${NEWSBOT_DOCKER_LOG_MAX_FILES:-3}
+  networks:
+    - newsbot
+
+services:
+  discord-bot:
+    <<: *newsbot-common
+    command: ["python", "-m", "newsbot.cli", "run-discord-bot"]
+    environment:
+      <<: [*common-environment, *discord-environment, *codex-environment]
+    restart: unless-stopped
+    volumes:
+      - newsbot-data:/app/data
+      - codex-home:/home/newsbot/.codex
+    healthcheck:
+      test: ["CMD", "python", "scripts/container_healthcheck.py", "newsbot.cli", "run-discord-bot"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  init-db:
+    <<: *newsbot-common
+    command: ["python", "-m", "newsbot.cli", "init-db"]
+    environment:
+      <<: *common-environment
+    network_mode: none
+    networks: []
+    profiles: ["tools"]
+    volumes:
+      - newsbot-data:/app/data
+
+  codex-login:
+    <<: *newsbot-common
+    command: ["codex", "login", "--device-auth"]
+    environment:
+      <<: *common-environment
+    profiles: ["tools"]
+    stdin_open: true
+    tty: true
+    volumes:
+      - codex-home:/home/newsbot/.codex
+
+  generate-review:
+    <<: *newsbot-common
+    command:
+      - python
+      - scripts/generate_payload_openai.py
+      - --topic
+      - ${NEWSBOT_GENERATE_REVIEW_TOPIC:-lab_automation}
+      - --cadence
+      - ${NEWSBOT_GENERATE_REVIEW_CADENCE:-weekly}
+      - --submit-review
+    environment:
+      <<: [*common-environment, *discord-environment, *codex-environment, *generation-environment]
+    profiles: ["tools"]
+    volumes:
+      - newsbot-data:/app/data
+      - newsbot-payloads:/app/payloads
+      - newsbot-logs:/app/logs
+      - codex-home:/home/newsbot/.codex
+
+  prepare-weekly:
+    <<: *newsbot-common
+    command:
+      - python
+      - -m
+      - newsbot.cli
+      - prepare-weekly-publish
+      - --topic
+      - ${NEWSBOT_GENERATE_REVIEW_TOPIC:-lab_automation}
+      - --cadence
+      - ${NEWSBOT_GENERATE_REVIEW_CADENCE:-weekly}
+    environment:
+      <<: [*common-environment, *discord-environment]
+    profiles: ["tools"]
+    volumes:
+      - newsbot-data:/app/data
+
+  scheduler:
+    <<: *newsbot-common
+    command: ["python", "scripts/run_docker_scheduler.py"]
+    environment:
+      <<: [*common-environment, *discord-environment, *codex-environment, *generation-environment]
+    profiles: ["scheduler"]
+    restart: unless-stopped
+    volumes:
+      - newsbot-data:/app/data
+      - newsbot-payloads:/app/payloads
+      - newsbot-logs:/app/logs
+      - codex-home:/home/newsbot/.codex
+    healthcheck:
+      test: ["CMD", "python", "scripts/container_healthcheck.py", "run_docker_scheduler.py"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+networks:
+  newsbot:
+    driver: bridge
+
+volumes:
+  codex-home:
+  newsbot-data:
+  newsbot-logs:
+  newsbot-payloads:

@@ -1,0 +1,67 @@
+{
+  "topic": "lab_automation",
+  "cadence": "weekly",
+  "period": "2026-05-25 to 2026-05-31 (JST)",
+  "items": [
+    {
+      "title": "[E2E-EDIT] Automated sample prep release adds modal-edit coverage",
+      "summary": "Use this draft to test Edit Draft. Change the title, body, category, tags, and reviewer note in Discord.",
+      "source": "Newsbot E2E Sample",
+      "url": "https://example.com/newsbot-e2e/edit",
+      "category_primary": "sample_prep",
+      "tags": ["e2e", "edit"],
+      "importance_score": 0.81,
+      "priority": "normal"
+    },
+    {
+      "title": "[E2E-WEEKLY] Robotic workflow update is ready for weekly publishing",
+      "summary": "Use this draft to test Approve Weekly, publish-weekly, and the Interested feedback button.",
+      "source": "Newsbot E2E Sample",
+      "url": "https://example.com/newsbot-e2e/weekly",
+      "category_primary": "robotics",
+      "tags": ["e2e", "weekly"],
+      "importance_score": 0.92,
+      "priority": "high"
+    },
+    {
+      "title": "[E2E-HOLD] Instrument integration item should be put on hold",
+      "summary": "Use this draft to test the Hold reviewer action.",
+      "source": "Newsbot E2E Sample",
+      "url": "https://example.com/newsbot-e2e/hold",
+      "category_primary": "instrument_integration",
+      "tags": ["e2e", "hold"],
+      "importance_score": 0.52,
+      "priority": "normal"
+    },
+    {
+      "title": "[E2E-REJECT] Low signal lab automation item should be rejected",
+      "summary": "Use this draft to test the Reject reviewer action.",
+      "source": "Newsbot E2E Sample",
+      "url": "https://example.com/newsbot-e2e/reject",
+      "category_primary": "low_signal",
+      "tags": ["e2e", "reject"],
+      "importance_score": 0.21,
+      "priority": "low"
+    },
+    {
+      "title": "[E2E-BREAKING-CANCEL] Breaking confirmation should be cancelled",
+      "summary": "Use this draft to test Publish Breaking followed by Cancel.",
+      "source": "Newsbot E2E Sample",
+      "url": "https://example.com/newsbot-e2e/breaking-cancel",
+      "category_primary": "breaking",
+      "tags": ["e2e", "breaking", "cancel"],
+      "importance_score": 0.72,
+      "priority": "normal"
+    },
+    {
+      "title": "[E2E-BREAKING-CONFIRM] Critical automation news should publish immediately",
+      "summary": "Use this draft to test Publish Breaking followed by Confirm Breaking Publish.",
+      "source": "Newsbot E2E Sample",
+      "url": "https://example.com/newsbot-e2e/breaking-confirm",
+      "category_primary": "breaking",
+      "tags": ["e2e", "breaking", "confirm"],
+      "importance_score": 0.98,
+      "priority": "high"
+    }
+  ]
+}

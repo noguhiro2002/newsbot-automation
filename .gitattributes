@@ -1,0 +1,12 @@
+* text=auto
+*.png binary
+*.sqlite binary
+*.sqlite3 binary
+*.db binary
+*.sh text eol=lf
+*.py text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+*.toml text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf

@@ -1,0 +1,108 @@
+{
+  "timezone": "Asia/Tokyo",
+  "language": {
+    "collect": ["ja", "en"],
+    "output": "ja"
+  },
+  "max_items": 30,
+  "dedupe_policy": {
+    "strict": true,
+    "exclude": [
+      "same_url",
+      "same_official_announcement",
+      "same_event",
+      "near_duplicate_headline",
+      "low_value_rewrite"
+    ],
+    "allow": ["material_follow_up"]
+  },
+  "source_priority": [
+    "official_company_announcement",
+    "investor_relations",
+    "regulatory_filing",
+    "official_research_institute",
+    "trusted_industry_media",
+    "peer_reviewed_or_preprint_paper",
+    "patent_database"
+  ],
+  "destinations": {
+    "lab_automation": {
+      "type": "discord",
+      "mode": "short_summary",
+      "delivery_phase": "live_when_discord_webhook_is_configured"
+    },
+    "stock_news": {
+      "type": "discord",
+      "mode": "short_summary",
+      "delivery_phase": "live_when_discord_webhook_is_configured"
+    }
+  },
+  "topics": {
+    "lab_automation": {
+      "name": "Lab Automation",
+      "scope": [
+        "research",
+        "clinical",
+        "manufacturing",
+        "quality_control",
+        "robotics",
+        "automated_experimentation",
+        "lims",
+        "ai_experiment_planning",
+        "analytical_instrument_integration"
+      ],
+      "sources": [
+        "company_official_news",
+        "research_institute_news",
+        "trusted_industry_media",
+        "paper_databases",
+        "patent_databases"
+      ],
+      "cadences": {
+        "weekly": {
+          "description": "Weekly weekday-morning watch in Japan time",
+          "rrule": "FREQ=WEEKLY;BYDAY=MO;BYHOUR=8;BYMINUTE=0;BYSECOND=0"
+        },
+        "monthly": {
+          "description": "Monthly first-Monday morning watch in Japan time",
+          "rrule": "FREQ=MONTHLY;BYDAY=1MO;BYHOUR=8;BYMINUTE=0;BYSECOND=0"
+        }
+      }
+    },
+    "stock_news": {
+      "name": "Stock News",
+      "scope": [
+        "japan_market_theme_stocks",
+        "us_large_cap_stocks",
+        "earnings",
+        "guidance",
+        "ir",
+        "regulatory_filings",
+        "large_price_moves",
+        "partnerships",
+        "m_and_a",
+        "product_announcements",
+        "litigation_or_regulatory_risk",
+        "supply_demand_materials"
+      ],
+      "default_themes": ["ai", "semiconductors", "biotech"],
+      "secondary_selection": "market_impact",
+      "cadences": {
+        "daily": {
+          "description": "Daily morning watch in Japan time",
+          "rrule": "FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR;BYHOUR=8;BYMINUTE=15;BYSECOND=0"
+        },
+        "weekly": {
+          "description": "Weekly Monday-morning watch in Japan time",
+          "rrule": "FREQ=WEEKLY;BYDAY=MO;BYHOUR=8;BYMINUTE=30;BYSECOND=0"
+        }
+      }
+    }
+  },
+  "manual_test_cases": [
+    "Lab weekly returns at most 30 high-signal items with source links, ordered by review priority.",
+    "Lab monthly avoids repeated weekly items unless there is material follow-up.",
+    "Stock daily includes confirmed reasons for price moves and avoids investment advice.",
+    "Stock weekly is readable in Discord and ordered by importance."
+  ]
+}

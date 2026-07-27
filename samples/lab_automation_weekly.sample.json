@@ -1,0 +1,19 @@
+{
+  "topic": "lab_automation",
+  "cadence": "weekly",
+  "period": "2026-05-18 to 2026-05-24 (JST)",
+  "items": [
+    {
+      "title": "Robotics lab expands autonomous assay workflow",
+      "summary": "A robotics platform update reduced manual plate handling and improved overnight experiment throughput.",
+      "why_it_matters": "It shows practical convergence between lab robotics and experiment planning software.",
+      "x_text": "Robotics lab expands autonomous assay workflow and improves overnight throughput.",
+      "source": "Sample official news",
+      "url": "https://example.com/lab-automation-update?utm_source=test",
+      "category_primary": "robotics",
+      "tags": ["robotics", "workflow"],
+      "importance_score": 0.82,
+      "priority": "high"
+    }
+  ]
+}
