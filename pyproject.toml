@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=69", "wheel"]
+requires = ["setuptools>=83.0.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -32,7 +32,7 @@ analysis = [
   "seaborn>=0.13.2,<0.14.0",
 ]
 docker = [
-  "croniter>=6.0.0,<7.0.0",
+  "croniter>=6.2.4,<7.0.0",
 ]
 
 [project.scripts]
