@@ -331,9 +331,9 @@ class GeneratePayloadOpenAITests(unittest.TestCase):
             parse_phase_models(["phase_9=gpt-x"])
 
     def test_parse_phase_reasoning(self):
-        parsed = parse_phase_reasoning(["phase_1=xhigh", "phase_4=high"])
+        parsed = parse_phase_reasoning(["phase_1=max", "phase_4=xhigh"])
 
-        self.assertEqual(parsed, {"phase_1": "xhigh", "phase_4": "high"})
+        self.assertEqual(parsed, {"phase_1": "max", "phase_4": "xhigh"})
 
     def test_parse_phase_reasoning_rejects_unsupported_effort(self):
         with self.assertRaises(ValueError):

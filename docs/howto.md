@@ -82,7 +82,7 @@ Notes:
 - `DISCORD_ALLOWED_GUILD_ID` is optional but recommended.
 - Leave `NEWSBOT_CODEX_BIN` blank to use `codex` from `PATH`.
 - Leave `NEWSBOT_CODEX_MODEL` blank to use the Codex CLI default.
-- `NEWSBOT_CODEX_REASONING_EFFORT` accepts `low`, `medium`, `high`, or `xhigh`.
+- `NEWSBOT_CODEX_REASONING_EFFORT` accepts `low`, `medium`, `high`, `xhigh`, or `max`.
 - Phase-specific model and reasoning values override the common Codex settings for the `lab_automation` multi-phase workflow.
 - `NEWSBOT_PAPER_API_RETMAX` controls Phase 4 candidates per paper API and defaults to 50.
 - Register `NEWSBOT_NCBI_TOOL` and the developer `NEWSBOT_NCBI_EMAIL` with NCBI before enabling PubMed. `NCBI_API_KEY` is optional.

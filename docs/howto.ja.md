@@ -82,7 +82,7 @@ NEWSBOT_LOOKBACK_DAYS=
 - `DISCORD_ALLOWED_GUILD_ID` は任意ですが、公開・共有環境では設定を推奨します。
 - `NEWSBOT_CODEX_BIN` が空の場合は `PATH` 上の `codex` を使います。
 - `NEWSBOT_CODEX_MODEL` が空の場合は Codex CLI 側のデフォルトモデルを使います。
-- `NEWSBOT_CODEX_REASONING_EFFORT` は `low`, `medium`, `high`, `xhigh` を指定できます。空の場合は Codex CLI 側のデフォルトです。
+- `NEWSBOT_CODEX_REASONING_EFFORT` は `low`, `medium`, `high`, `xhigh`, `max` を指定できます。空の場合は Codex CLI 側のデフォルトです。
 - `NEWSBOT_LAB_AUTOMATION_PHASE_<N>_MODEL` と `NEWSBOT_LAB_AUTOMATION_PHASE_<N>_REASONING_EFFORT` で、lab_automation multi-agent のPhase別デフォルトを指定できます。
 - `NEWSBOT_LAB_AUTOMATION_MASTER_MODEL` と `NEWSBOT_LAB_AUTOMATION_MASTER_REASONING_EFFORT` で、Master統合のデフォルトを指定できます。
 - `NEWSBOT_PAPER_API_RETMAX` はPhase 4の論文API取得件数です。空の場合は50です。

@@ -27,10 +27,10 @@ from newsbot.paper_api import (
 from newsbot.ranking import REVIEW_MAX_ITEMS, rank_news_items
 
 
-DEFAULT_CODEX_TIMEOUT_SECONDS = 60 * 20
+DEFAULT_CODEX_TIMEOUT_SECONDS = 60 * 60
 PROMPT_TEMPLATE_DIR = PROJECT_ROOT / "prompts"
 LAB_AUTOMATION_TOPIC = "lab_automation"
-SUPPORTED_REASONING_EFFORTS = {"low", "medium", "high", "xhigh"}
+SUPPORTED_REASONING_EFFORTS = {"low", "medium", "high", "xhigh", "max"}
 
 
 @dataclass(frozen=True)
