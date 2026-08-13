@@ -69,7 +69,7 @@ NEWSBOT_LAB_AUTOMATION_MASTER_MODEL=
 NEWSBOT_LAB_AUTOMATION_MASTER_REASONING_EFFORT=
 NEWSBOT_PAPER_API_RETMAX=
 NEWSBOT_NCBI_TOOL=newsbot_automation
-NEWSBOT_NCBI_EMAIL=
+NEWSBOT_NCBI_EMAIL=your-email@example.com
 NCBI_API_KEY=
 NEWSBOT_CROSSREF_MAILTO=
 NEWSBOT_API_CACHE_TTL_SECONDS=21600
@@ -86,9 +86,13 @@ NEWSBOT_LOOKBACK_DAYS=
 - `NEWSBOT_LAB_AUTOMATION_PHASE_<N>_MODEL` と `NEWSBOT_LAB_AUTOMATION_PHASE_<N>_REASONING_EFFORT` で、lab_automation multi-agent のPhase別デフォルトを指定できます。
 - `NEWSBOT_LAB_AUTOMATION_MASTER_MODEL` と `NEWSBOT_LAB_AUTOMATION_MASTER_REASONING_EFFORT` で、Master統合のデフォルトを指定できます。
 - `NEWSBOT_PAPER_API_RETMAX` はPhase 4の論文API取得件数です。空の場合は50です。
-- PubMedを使う前に、`NEWSBOT_NCBI_TOOL`と開発者の`NEWSBOT_NCBI_EMAIL`をNCBIへ登録してください。`NCBI_API_KEY`は任意です。
-- NCBIはAPIキーなしで3 request/秒、ありで10 request/秒に制限します。`NEWSBOT_CROSSREF_MAILTO`を設定するとCrossref polite poolを使います。
+- `NEWSBOT_NCBI_TOOL` は空白を含まない、このアプリを識別する名前です。通常は `newsbot_automation` のままで構いません。
+- `NEWSBOT_NCBI_EMAIL` は運用者・開発者本人の有効な連絡先メールアドレスです。第三者利用者のメールアドレスは指定しません。
+- PubMedを継続利用する場合は、使用するtool名、email、開発者または組織名を `eutilities@ncbi.nlm.nih.gov` に連絡して登録してください。
+- `NCBI_API_KEY` は任意です。このクライアントはキー設定時も3リクエスト/秒以下に制限します。PubMed IDはまとめてEFetchし、API呼び出し数を抑えます。
+- `NEWSBOT_CROSSREF_MAILTO`を設定するとCrossref polite poolを使います。
 - API responseは`data/api-cache/`へ`NEWSBOT_API_CACHE_TTL_SECONDS`の期間cacheします。
+- arXiv legacy APIは3秒に1回以下、同時接続1本に制限します。レート制御は`data/api-cache/`のlockを介して同一ホスト上の複数実行で共有します。
 - `NEWSBOT_LOOKBACK_DAYS` が空の場合は、前回成功実行時から今回実行時までを検索します。
 
 ## 4. DBを初期化する

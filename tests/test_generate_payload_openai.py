@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from scripts.generate_payload_openai import (
+    add_paper_api_candidate_ids,
     build_prompt,
     build_generation_prompt,
     build_master_prompt,
@@ -23,6 +24,7 @@ from scripts.generate_payload_openai import (
     select_review_items,
     validate_phase_output,
     validate_payload_dict,
+    write_phase_4_rejections,
     write_last_run,
 )
 
@@ -261,6 +263,7 @@ class GeneratePayloadOpenAITests(unittest.TestCase):
             self.assertTrue(output.with_suffix(".phase_4.paper_api.json").exists())
             phase_4_prompt = output.with_suffix(".phase_4.prompt.txt").read_text(encoding="utf-8")
             self.assertIn("API candidate paper", phase_4_prompt)
+            self.assertIn("paper-api-", phase_4_prompt)
 
     def test_main_skip_codex_disable_paper_api_does_not_collect(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch("scripts.generate_payload_openai.collect_paper_api_candidates") as collect:
@@ -288,6 +291,54 @@ class GeneratePayloadOpenAITests(unittest.TestCase):
             self.assertEqual(exit_code, 0)
             collect.assert_not_called()
             self.assertFalse(output.with_suffix(".phase_4.paper_api.json").exists())
+
+    def test_only_phase_4_runs_phase_and_skips_master(self):
+        phase_payload = {
+            "phase": "phase_4_papers",
+            "period": "2026-05-30 to 2026-06-06 (JST)",
+            "candidates": [],
+            "search_coverage": {
+                "queries_run": [],
+                "notable_zero_result_queries": [],
+                "limitations": "",
+            },
+        }
+
+        def fake_run_codex(**kwargs):
+            kwargs["log_path"].write_text("fake log", encoding="utf-8")
+            return json.dumps(phase_payload)
+
+        with tempfile.TemporaryDirectory() as temp_dir, patch(
+            "scripts.generate_payload_openai.run_codex", side_effect=fake_run_codex
+        ) as run:
+            temp_path = Path(temp_dir)
+            output = temp_path / "payload.json"
+            db_path = temp_path / "newsbot.sqlite3"
+            exit_code = main(
+                [
+                    "--topic",
+                    "lab_automation",
+                    "--cadence",
+                    "weekly",
+                    "--period",
+                    "2026-05-30 to 2026-06-06 (JST)",
+                    "--output",
+                    str(output),
+                    "--db",
+                    str(db_path),
+                    "--only-phase",
+                    "phase_4",
+                    "--disable-paper-api",
+                ]
+            )
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(run.call_count, 1)
+            self.assertTrue(output.with_suffix(".phase_4.prompt.txt").exists())
+            self.assertTrue(output.with_suffix(".phase_4.json").exists())
+            self.assertFalse(output.with_suffix(".phase_1.prompt.txt").exists())
+            self.assertFalse(output.with_suffix(".master.prompt.txt").exists())
+            self.assertFalse(output.exists())
 
     def test_main_single_agent_skip_codex_uses_legacy_topic_template(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -349,6 +400,110 @@ class GeneratePayloadOpenAITests(unittest.TestCase):
                     "search_coverage": {},
                 },
                 expected_phase="phase_1_domestic_official",
+            )
+
+    def test_validate_phase_4_output_accounts_for_every_api_candidate(self):
+        paper_api_result = add_paper_api_candidate_ids(
+            {
+                "candidates": [
+                    {
+                        "title": "Selected API paper",
+                        "source": "Crossref",
+                        "url": "https://doi.org/10.1/selected",
+                        "doi": "10.1/selected",
+                        "published_date": "2026-06-01",
+                    },
+                    {
+                        "title": "Rejected API paper",
+                        "source": "Crossref",
+                        "url": "https://doi.org/10.1/rejected",
+                        "doi": "10.1/rejected",
+                        "published_date": "2026-06-02",
+                    },
+                ]
+            }
+        )
+        selected_id, rejected_id = [
+            candidate["candidate_id"] for candidate in paper_api_result["candidates"]
+        ]
+        value = {
+            "phase": "phase_4_papers",
+            "period": "2026-05-30 to 2026-06-06 (JST)",
+            "candidates": [
+                {
+                    "title": "Selected API paper",
+                    "source": "Crossref",
+                    "url": "https://doi.org/10.1/selected",
+                    "published_date": "2026-06-01",
+                    "source_type": "paper",
+                    "geography": "Global",
+                    "lab_automation_relevance": "Directly relevant.",
+                    "evidence": "Verified example.",
+                    "confidence": 0.9,
+                    "canonical_source_checked": True,
+                    "duplicate_key": "selected-api-paper",
+                    "paper_api_candidate_ids": [selected_id],
+                }
+            ],
+            "excluded_api_candidates": [
+                {
+                    "candidate_id": rejected_id,
+                    "reason_code": "insufficient_directness",
+                    "reason": "No direct connection to experimental automation.",
+                }
+            ],
+            "search_coverage": {
+                "queries_run": [],
+                "notable_zero_result_queries": [],
+                "limitations": "",
+            },
+        }
+
+        validated = validate_phase_output(
+            value,
+            expected_phase="phase_4_papers",
+            paper_api_candidates=paper_api_result["candidates"],
+        )
+
+        self.assertEqual(validated["paper_api_audit"]["input_candidate_count"], 2)
+        self.assertEqual(validated["paper_api_audit"]["selected_candidate_count"], 1)
+        self.assertEqual(validated["paper_api_audit"]["excluded_candidate_count"], 1)
+        self.assertEqual(validated["excluded_api_candidates"][0]["title"], "Rejected API paper")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output = Path(temp_dir) / "payload.json"
+            artifact = write_phase_4_rejections(output, validated)
+            saved = json.loads(artifact.read_text(encoding="utf-8"))
+        self.assertEqual(saved["paper_api_audit"]["unaccounted_candidate_count"], 0)
+        self.assertEqual(saved["excluded_api_candidates"][0]["candidate_id"], rejected_id)
+
+    def test_validate_phase_4_output_rejects_unaccounted_api_candidate(self):
+        paper_api_result = add_paper_api_candidate_ids(
+            {
+                "candidates": [
+                    {
+                        "title": "Unaccounted paper",
+                        "source": "Crossref",
+                        "url": "https://doi.org/10.1/unaccounted",
+                        "doi": "10.1/unaccounted",
+                        "published_date": "2026-06-01",
+                    }
+                ]
+            }
+        )
+        value = {
+            "phase": "phase_4_papers",
+            "period": "2026-05-30 to 2026-06-06 (JST)",
+            "candidates": [],
+            "excluded_api_candidates": [],
+            "search_coverage": {},
+        }
+
+        with self.assertRaisesRegex(ValueError, "missing a disposition"):
+            validate_phase_output(
+                value,
+                expected_phase="phase_4_papers",
+                paper_api_candidates=paper_api_result["candidates"],
             )
 
     def test_build_master_prompt_embeds_phase_outputs(self):

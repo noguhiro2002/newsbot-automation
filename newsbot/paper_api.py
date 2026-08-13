@@ -9,10 +9,13 @@ import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 from dataclasses import asdict, dataclass
+from contextlib import contextmanager
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 from urllib.error import HTTPError, URLError
+
+import fcntl
 
 
 DEFAULT_PAPER_QUERIES = [
@@ -44,6 +47,8 @@ SENSITIVE_QUERY_PARAMETERS = frozenset(
 )
 RETRYABLE_HTTP_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
 DEFAULT_API_CACHE_TTL_SECONDS = 6 * 60 * 60
+NCBI_REQUESTS_PER_SECOND = 3
+ARXIV_SECONDS_BETWEEN_REQUESTS = 3
 
 
 @dataclass(frozen=True)
@@ -68,10 +73,12 @@ class RequestRateLimiter:
         *,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
+        shared_lock_path: Path | None = None,
     ):
         self.minimum_interval = 1.0 / max(0.1, requests_per_second)
         self.clock = clock
         self.sleep = sleep
+        self.shared_lock_path = shared_lock_path
         self._last_request_at: float | None = None
 
     def wait(self) -> None:
@@ -83,17 +90,51 @@ class RequestRateLimiter:
                 now = self.clock()
         self._last_request_at = now
 
+    @contextmanager
+    def request_slot(self) -> Iterator[None]:
+        if self.shared_lock_path is None:
+            self.wait()
+            yield
+            return
+
+        self.shared_lock_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with self.shared_lock_path.open("a+", encoding="utf-8") as handle:
+            os.chmod(self.shared_lock_path, 0o600)
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            handle.seek(0)
+            raw_last_request_at = handle.read().strip()
+            try:
+                last_request_at = float(raw_last_request_at)
+            except ValueError:
+                last_request_at = 0.0
+            now = time.time()
+            remaining = self.minimum_interval - (now - last_request_at)
+            if remaining > 0:
+                self.sleep(remaining)
+                now = time.time()
+            handle.seek(0)
+            handle.truncate()
+            handle.write(str(now))
+            handle.flush()
+            try:
+                yield
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
 
 @dataclass
 class ApiRequestContext:
     cache_dir: Path | None
     cache_ttl_seconds: int
     max_retries: int
+    arxiv_limiter: RequestRateLimiter
     ncbi_limiter: RequestRateLimiter
     crossref_limiter: RequestRateLimiter
 
     def limiter_for(self, url: str) -> RequestRateLimiter | None:
         hostname = (urllib.parse.urlsplit(url).hostname or "").lower()
+        if hostname == "export.arxiv.org":
+            return self.arxiv_limiter
         if hostname == "eutils.ncbi.nlm.nih.gov":
             return self.ncbi_limiter
         if hostname == "api.crossref.org":
@@ -129,18 +170,36 @@ def collect_paper_api_candidates(
     limit = max(1, retmax)
     fetcher = opener or urllib.request.urlopen
     production_requests = opener is None
+    shared_rate_limit_dir = Path(cache_dir) if cache_dir and production_requests else None
     request_context = ApiRequestContext(
         cache_dir=Path(cache_dir) if cache_dir else None,
         cache_ttl_seconds=max(0, cache_ttl_seconds),
         max_retries=3 if production_requests else 0,
-        ncbi_limiter=RequestRateLimiter(10 if ncbi_api_key else 3),
-        crossref_limiter=RequestRateLimiter(10 if crossref_mailto else 5),
+        arxiv_limiter=RequestRateLimiter(
+            1 / ARXIV_SECONDS_BETWEEN_REQUESTS if production_requests else 1000,
+            shared_lock_path=(shared_rate_limit_dir / ".arxiv-rate-limit.lock")
+            if shared_rate_limit_dir
+            else None,
+        ),
+        ncbi_limiter=RequestRateLimiter(
+            NCBI_REQUESTS_PER_SECOND if production_requests else 1000,
+            shared_lock_path=(shared_rate_limit_dir / ".ncbi-rate-limit.lock")
+            if shared_rate_limit_dir
+            else None,
+        ),
+        crossref_limiter=RequestRateLimiter(
+            (10 if crossref_mailto else 5) if production_requests else 1000
+        ),
     )
     coverage: dict[str, Any] = {
         "period": period,
         "start_date": start_date.isoformat(),
         "end_date": end_date.isoformat(),
         "retmax_per_api": limit,
+        "request_policy": {
+            "arxiv": "at most one request every three seconds; one connection at a time",
+            "pubmed": "at most three requests per second, including when an API key is configured",
+        },
         "api_queries_run": [],
         "api_failures": [],
         "limitations": "",
@@ -501,11 +560,14 @@ def fetch_url(
     max_retries = context.max_retries if context else 0
     limiter = context.limiter_for(url) if context else None
     for attempt in range(max_retries + 1):
-        if limiter:
-            limiter.wait()
         try:
-            with opener(request, timeout=timeout) as response:
-                body = response.read()
+            if limiter:
+                with limiter.request_slot():
+                    with opener(request, timeout=timeout) as response:
+                        body = response.read()
+            else:
+                with opener(request, timeout=timeout) as response:
+                    body = response.read()
             if cache_path:
                 write_api_cache(cache_path, body)
             return body

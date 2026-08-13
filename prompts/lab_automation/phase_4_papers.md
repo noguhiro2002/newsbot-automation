@@ -28,6 +28,24 @@ Python側が arXiv / PubMed / bioRxiv / medRxiv / Crossref から取得し、期
 
 API候補が0件またはAPI取得に失敗している場合は、`paper_api_coverage` の内容を `search_coverage.limitations` に反映し、補助的なWeb検索で確認してください。
 
+各API候補には `candidate_id` があります。API候補を1件ずつ評価し、すべてのIDを必ず次のどちらか一方に記録してください。
+
+* 採用する場合: `candidates[].paper_api_candidate_ids` にIDを入れる。同じ研究の複数API候補を統合した場合は、対応する全IDを入れる。
+* 除外する場合: `excluded_api_candidates` にID、理由コード、具体的な除外理由を入れる。
+
+Web検索で新規発見し、API候補に対応しない採用候補は `paper_api_candidate_ids: []` としてください。API候補を未判定のまま残したり、同じIDを採用と除外の両方に入れたりしないでください。
+
+除外理由コードは次のいずれかです。
+
+* `out_of_scope`: Lab Automation領域外
+* `insufficient_directness`: 関連語はあるが実験自動化との直接性が不足
+* `insufficient_evidence`: 内容や実装実体を裏付ける情報が不足
+* `outside_period`: canonical sourceの公開日が対象期間外
+* `duplicate`: 同一研究・同一論文の重複候補
+* `superseded_by_canonical_version`: 査読済み版など、より適切なcanonical版が存在
+* `unverifiable`: URL、公開日、内容などを検証できない
+* `other`: 上記以外。理由を具体的に記載する
+
 ### paper_api_candidates
 
 ```json
@@ -409,7 +427,15 @@ site:plos.org "self-driving laboratory"
       "evidence": "...",
       "confidence": 0.0,
       "canonical_source_checked": true,
-      "duplicate_key": "normalized-event-name"
+      "duplicate_key": "normalized-event-name",
+      "paper_api_candidate_ids": ["paper-api-..."]
+    }
+  ],
+  "excluded_api_candidates": [
+    {
+      "candidate_id": "paper-api-...",
+      "reason_code": "insufficient_directness",
+      "reason": "タイトルとabstractを確認したが、実験装置・ロボット・研究ワークフローとの直接接続が示されていない。"
     }
   ],
   "search_coverage": {

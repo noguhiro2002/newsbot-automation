@@ -7,6 +7,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from newsbot.paper_api import (
+    ARXIV_SECONDS_BETWEEN_REQUESTS,
+    NCBI_REQUESTS_PER_SECOND,
     ApiRequestContext,
     PaperCandidate,
     RequestRateLimiter,
@@ -39,6 +41,34 @@ class FakeResponse:
 
 
 class PaperApiTests(unittest.TestCase):
+    def test_provider_rate_limits_match_policy(self):
+        self.assertEqual(NCBI_REQUESTS_PER_SECOND, 3)
+        self.assertEqual(ARXIV_SECONDS_BETWEEN_REQUESTS, 3)
+        self.assertAlmostEqual(
+            RequestRateLimiter(NCBI_REQUESTS_PER_SECOND).minimum_interval,
+            1 / 3,
+        )
+        self.assertEqual(
+            RequestRateLimiter(1 / ARXIV_SECONDS_BETWEEN_REQUESTS).minimum_interval,
+            3,
+        )
+
+    def test_arxiv_uses_its_dedicated_limiter(self):
+        arxiv_limiter = RequestRateLimiter(1 / ARXIV_SECONDS_BETWEEN_REQUESTS)
+        context = ApiRequestContext(
+            cache_dir=None,
+            cache_ttl_seconds=0,
+            max_retries=0,
+            arxiv_limiter=arxiv_limiter,
+            ncbi_limiter=RequestRateLimiter(NCBI_REQUESTS_PER_SECOND),
+            crossref_limiter=RequestRateLimiter(5),
+        )
+
+        self.assertIs(
+            context.limiter_for("https://export.arxiv.org/api/query?search_query=test"),
+            arxiv_limiter,
+        )
+
     def test_redacts_sensitive_query_parameters_and_nested_values(self):
         url = "https://example.com/items?term=lab&api_key=dummy&token=dummy"
 
@@ -68,6 +98,7 @@ class PaperApiTests(unittest.TestCase):
             cache_dir=None,
             cache_ttl_seconds=0,
             max_retries=0,
+            arxiv_limiter=RequestRateLimiter(1000),
             ncbi_limiter=RequestRateLimiter(1000),
             crossref_limiter=RequestRateLimiter(1000),
         )
@@ -100,6 +131,7 @@ class PaperApiTests(unittest.TestCase):
                 cache_dir=cache_dir,
                 cache_ttl_seconds=60,
                 max_retries=0,
+                arxiv_limiter=RequestRateLimiter(1000),
                 ncbi_limiter=RequestRateLimiter(1000),
                 crossref_limiter=RequestRateLimiter(1000),
             )
@@ -133,6 +165,7 @@ class PaperApiTests(unittest.TestCase):
             cache_dir=None,
             cache_ttl_seconds=0,
             max_retries=1,
+            arxiv_limiter=RequestRateLimiter(1000),
             ncbi_limiter=RequestRateLimiter(1000),
             crossref_limiter=RequestRateLimiter(1000),
         )

@@ -144,7 +144,24 @@ scripts/run_llm_model_audit.sh \
 ```
 
 Phase 4は既定で arXiv / PubMed / bioRxiv / medRxiv / Crossref APIから論文候補を取得し、候補JSONをPhase 4 promptへ埋め込みます。従来のCodex prompt-only探索に戻したい場合は、`--disable-paper-api`を指定します。
-PubMedを使うには、NCBIへ登録済みの`NEWSBOT_NCBI_TOOL`と`NEWSBOT_NCBI_EMAIL`を設定します。APIキーはHTTP requestだけに使われ、coverage・prompt・Codex logへ保存しません。clientはNCBI/Crossrefのrate limitとretry/backoff、および秘密を含まないAPI cacheを適用します。
+PubMedを使うには、NCBIへ登録済みの`NEWSBOT_NCBI_TOOL`と`NEWSBOT_NCBI_EMAIL`を設定します。toolは空白を含まないアプリ識別名（例: `newsbot_automation`）、emailは運用者・開発者本人の有効な連絡先です。両方の値と開発者または組織名を`eutilities@ncbi.nlm.nih.gov`へ連絡して登録します。APIキーはHTTP requestだけに使われ、coverage・prompt・Codex logへ保存しません。clientはNCBI/Crossrefのrate limitとretry/backoff、および秘密を含まないAPI cacheを適用します。
+
+NCBI E-utilitiesはAPI keyの有無にかかわらず3 request/秒以下に固定し、PubMed IDは1回のEFetchへまとめます。arXiv legacy APIは3秒に1回以下・同時接続1本に制限します。`data/api-cache/`配下のlockにより、同一ホスト上で複数runが重なっても間隔と単一接続を共有します。429/5xxと一時的な通信失敗にはrate limitを維持したままretry/backoffを適用します。
+
+Phase 4は各API候補にIDを付け、採用候補の`paper_api_candidate_ids`または除外候補の`excluded_api_candidates`へ必ず振り分けます。未判定・二重判定・未知IDがあれば生成を失敗させます。除外結果は`payloads/lab_automation_weekly_<timestamp>.phase_4.rejections.json`にも保存されます。Masterには採用候補と集計だけを渡し、詳細な除外一覧は監査artifactに保持します。
+
+Phase 4だけをテストする場合は、次を実行します。Master builder、最終payload生成、Discord投稿は行いません。
+
+```bash
+.venv/bin/python scripts/generate_payload_openai.py \
+  --topic lab_automation \
+  --cadence weekly \
+  --lookback-days 7 \
+  --only-phase phase_4 \
+  --phase-model phase_4=gpt-5.6-luna \
+  --phase-reasoning phase_4=max \
+  --codex-timeout 3600
+```
 
 ### 固定候補poolによるMaster paired audit
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import subprocess
@@ -31,6 +32,16 @@ DEFAULT_CODEX_TIMEOUT_SECONDS = 60 * 60
 PROMPT_TEMPLATE_DIR = PROJECT_ROOT / "prompts"
 LAB_AUTOMATION_TOPIC = "lab_automation"
 SUPPORTED_REASONING_EFFORTS = {"low", "medium", "high", "xhigh", "max"}
+PHASE_4_EXCLUSION_REASON_CODES = {
+    "duplicate",
+    "insufficient_directness",
+    "insufficient_evidence",
+    "outside_period",
+    "out_of_scope",
+    "superseded_by_canonical_version",
+    "unverifiable",
+    "other",
+}
 
 
 @dataclass(frozen=True)
@@ -439,7 +450,12 @@ def lab_automation_prompt_dir(template_dir: Path = PROMPT_TEMPLATE_DIR) -> Path:
     return template_dir / LAB_AUTOMATION_TOPIC
 
 
-def validate_phase_output(value: dict[str, Any], *, expected_phase: str) -> dict[str, Any]:
+def validate_phase_output(
+    value: dict[str, Any],
+    *,
+    expected_phase: str,
+    paper_api_candidates: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     if value.get("phase") != expected_phase:
         raise ValueError(f"Phase output must include phase={expected_phase!r}")
     if not str(value.get("period") or "").strip():
@@ -478,6 +494,82 @@ def validate_phase_output(value: dict[str, Any], *, expected_phase: str) -> dict
             raise ValueError(f"{expected_phase}: candidate {index} confidence must be between 0.0 and 1.0")
         if not isinstance(candidate.get("canonical_source_checked"), bool):
             raise ValueError(f"{expected_phase}: candidate {index} canonical_source_checked must be boolean")
+
+    if expected_phase == "phase_4_papers" and paper_api_candidates is not None:
+        expected_by_id = {
+            str(candidate.get("candidate_id") or ""): candidate
+            for candidate in paper_api_candidates
+        }
+        if "" in expected_by_id or len(expected_by_id) != len(paper_api_candidates):
+            raise ValueError("phase_4_papers: paper API candidate IDs must be present and unique")
+
+        selected_ids: list[str] = []
+        for index, candidate in enumerate(candidates):
+            ids = candidate.get("paper_api_candidate_ids", [])
+            if not isinstance(ids, list) or not all(isinstance(item, str) and item for item in ids):
+                raise ValueError(
+                    f"phase_4_papers: candidate {index} paper_api_candidate_ids must be a list of strings"
+                )
+            selected_ids.extend(ids)
+
+        excluded = value.get("excluded_api_candidates")
+        if not isinstance(excluded, list):
+            raise ValueError("phase_4_papers: excluded_api_candidates must be a list")
+        excluded_by_id: dict[str, dict[str, Any]] = {}
+        for index, item in enumerate(excluded):
+            if not isinstance(item, dict):
+                raise ValueError(f"phase_4_papers: excluded candidate {index} must be an object")
+            candidate_id = str(item.get("candidate_id") or "").strip()
+            reason_code = str(item.get("reason_code") or "").strip()
+            reason = str(item.get("reason") or "").strip()
+            if not candidate_id:
+                raise ValueError(f"phase_4_papers: excluded candidate {index} candidate_id is required")
+            if reason_code not in PHASE_4_EXCLUSION_REASON_CODES:
+                allowed = ", ".join(sorted(PHASE_4_EXCLUSION_REASON_CODES))
+                raise ValueError(
+                    f"phase_4_papers: excluded candidate {index} reason_code must be one of: {allowed}"
+                )
+            if not reason:
+                raise ValueError(f"phase_4_papers: excluded candidate {index} reason is required")
+            if candidate_id in excluded_by_id:
+                raise ValueError(f"phase_4_papers: duplicate excluded candidate ID: {candidate_id}")
+            excluded_by_id[candidate_id] = item
+
+        selected_set = set(selected_ids)
+        excluded_set = set(excluded_by_id)
+        expected_set = set(expected_by_id)
+        duplicate_selected = sorted(candidate_id for candidate_id in selected_set if selected_ids.count(candidate_id) > 1)
+        overlap = sorted(selected_set & excluded_set)
+        unknown = sorted((selected_set | excluded_set) - expected_set)
+        missing = sorted(expected_set - selected_set - excluded_set)
+        if duplicate_selected:
+            raise ValueError(f"phase_4_papers: API candidate selected more than once: {', '.join(duplicate_selected)}")
+        if overlap:
+            raise ValueError(f"phase_4_papers: API candidate both selected and excluded: {', '.join(overlap)}")
+        if unknown:
+            raise ValueError(f"phase_4_papers: unknown API candidate IDs: {', '.join(unknown)}")
+        if missing:
+            raise ValueError(f"phase_4_papers: API candidates missing a disposition: {', '.join(missing)}")
+
+        value["excluded_api_candidates"] = [
+            {
+                "candidate_id": candidate_id,
+                "title": expected_by_id[candidate_id].get("title", ""),
+                "source": expected_by_id[candidate_id].get("source", ""),
+                "url": expected_by_id[candidate_id].get("url", ""),
+                "published_date": expected_by_id[candidate_id].get("published_date", ""),
+                "reason_code": excluded_by_id[candidate_id]["reason_code"],
+                "reason": excluded_by_id[candidate_id]["reason"],
+            }
+            for candidate_id in expected_by_id
+            if candidate_id in excluded_by_id
+        ]
+        value["paper_api_audit"] = {
+            "input_candidate_count": len(expected_set),
+            "selected_candidate_count": len(selected_set),
+            "excluded_candidate_count": len(excluded_set),
+            "unaccounted_candidate_count": 0,
+        }
     return value
 
 
@@ -772,25 +864,67 @@ def run_newsbot_command(args: list[str]) -> int:
     return completed.returncode
 
 
+def paper_api_candidate_id(candidate: dict[str, Any]) -> str:
+    identity = str(
+        candidate.get("doi")
+        or candidate.get("url")
+        or candidate.get("title")
+        or ""
+    ).strip().lower()
+    return "paper-api-" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
+
+
+def add_paper_api_candidate_ids(result: dict[str, Any]) -> dict[str, Any]:
+    for candidate in result.get("candidates") or []:
+        candidate["candidate_id"] = paper_api_candidate_id(candidate)
+    return result
+
+
+def phase_output_for_master(phase_output: dict[str, Any]) -> dict[str, Any]:
+    if phase_output.get("phase") != "phase_4_papers":
+        return phase_output
+    compact = dict(phase_output)
+    compact.pop("excluded_api_candidates", None)
+    return compact
+
+
+def write_phase_4_rejections(output_path: Path, phase_output: dict[str, Any]) -> Path:
+    artifact_path = phase_artifact_path(output_path, "phase_4", ".rejections.json")
+    write_json(
+        artifact_path,
+        {
+            "phase": phase_output.get("phase"),
+            "period": phase_output.get("period"),
+            "paper_api_audit": phase_output.get("paper_api_audit") or {},
+            "excluded_api_candidates": phase_output.get("excluded_api_candidates") or [],
+        },
+    )
+    return artifact_path
+
+
 def collect_phase_4_paper_api_if_enabled(args: argparse.Namespace, *, period: str, output_path: Path) -> dict[str, Any] | None:
     if args.disable_paper_api:
         return None
-    cache_dir_value = os.getenv(
-        "NEWSBOT_API_CACHE_DIR", str(PROJECT_ROOT / "data" / "api-cache")
-    ).strip()
+    cache_dir_value = os.getenv("NEWSBOT_API_CACHE_DIR", "").strip() or str(
+        PROJECT_ROOT / "data" / "api-cache"
+    )
     cache_ttl_value = os.getenv(
         "NEWSBOT_API_CACHE_TTL_SECONDS", str(DEFAULT_API_CACHE_TTL_SECONDS)
     ).strip()
-    result = redact_sensitive_values(collect_paper_api_candidates(
-        period=period,
-        retmax=paper_api_retmax(args.paper_api_retmax),
-        ncbi_api_key=os.getenv("NCBI_API_KEY", "").strip(),
-        ncbi_tool=os.getenv("NEWSBOT_NCBI_TOOL", "").strip(),
-        ncbi_email=os.getenv("NEWSBOT_NCBI_EMAIL", "").strip(),
-        crossref_mailto=os.getenv("NEWSBOT_CROSSREF_MAILTO", "").strip(),
-        cache_dir=cache_dir_value or None,
-        cache_ttl_seconds=int(cache_ttl_value),
-    ))
+    result = add_paper_api_candidate_ids(
+        redact_sensitive_values(
+            collect_paper_api_candidates(
+                period=period,
+                retmax=paper_api_retmax(args.paper_api_retmax),
+                ncbi_api_key=os.getenv("NCBI_API_KEY", "").strip(),
+                ncbi_tool=os.getenv("NEWSBOT_NCBI_TOOL", "").strip(),
+                ncbi_email=os.getenv("NEWSBOT_NCBI_EMAIL", "").strip(),
+                crossref_mailto=os.getenv("NEWSBOT_CROSSREF_MAILTO", "").strip(),
+                cache_dir=cache_dir_value,
+                cache_ttl_seconds=int(cache_ttl_value),
+            )
+        )
+    )
     artifact_path = phase_artifact_path(output_path, "phase_4", ".paper_api.json")
     write_json(artifact_path, result)
     candidate_count = len(result.get("candidates") or [])
@@ -818,6 +952,8 @@ def run_lab_automation_multi_agent(
     preference_profile: dict[str, Any] | None,
 ) -> dict[str, Any] | None:
     phases = lab_automation_phase_definitions()
+    if args.only_phase:
+        phases = [phase for phase in phases if phase.key == args.only_phase]
     phase_models = parse_phase_models(list(args.phase_model))
     phase_reasoning = parse_phase_reasoning(list(args.phase_reasoning))
     default_model = default_codex_model(args.codex_model)
@@ -845,6 +981,9 @@ def run_lab_automation_multi_agent(
             prompt_path.parent.mkdir(parents=True, exist_ok=True)
             prompt_path.write_text(prompt, encoding="utf-8")
             log_step(f"wrote {phase.key} prompt from {template_path}: {prompt_path}")
+        if args.only_phase:
+            log_step(f"{args.only_phase}-only prompt generation finished")
+            return None
         master_prompt, master_template_path = build_master_prompt(
             topic=args.topic,
             cadence=args.cadence,
@@ -895,10 +1034,28 @@ def run_lab_automation_multi_agent(
             timeout=args.codex_timeout,
             log_path=log_path,
         )
-        phase_json = validate_phase_output(extract_json_object(output), expected_phase=phase.phase)
+        phase_json = validate_phase_output(
+            extract_json_object(output),
+            expected_phase=phase.phase,
+            paper_api_candidates=(paper_api_result or {}).get("candidates")
+            if phase.key == "phase_4" and paper_api_result is not None
+            else None,
+        )
         write_json(json_path, phase_json)
-        phase_outputs.append(phase_json)
+        if phase.key == "phase_4" and paper_api_result is not None:
+            rejections_path = write_phase_4_rejections(output_path, phase_json)
+            log_step(
+                "phase_4 API candidate audit written: "
+                f"selected={phase_json['paper_api_audit']['selected_candidate_count']}, "
+                f"excluded={phase_json['paper_api_audit']['excluded_candidate_count']}, "
+                f"output={rejections_path}"
+            )
+        phase_outputs.append(phase_output_for_master(phase_json))
         log_step(f"{phase.key} finished: candidates={len(phase_json.get('candidates') or [])}, output={json_path}")
+
+    if args.only_phase:
+        log_step(f"{args.only_phase}-only execution finished; skipping master builder and Discord submission")
+        return None
 
     master_prompt, master_template_path = build_master_prompt(
         topic=args.topic,
@@ -963,6 +1120,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--codex-arg", action="append", default=[], help="Extra argument passed to `codex exec`.")
     parser.add_argument("--codex-timeout", type=int, default=DEFAULT_CODEX_TIMEOUT_SECONDS)
     parser.add_argument("--single-agent", action="store_true", help="Use the legacy single-prompt workflow even for lab_automation.")
+    parser.add_argument(
+        "--only-phase",
+        choices=[phase.key for phase in lab_automation_phase_definitions()],
+        default="",
+        help="Run only one lab_automation phase and skip the master builder and Discord submission.",
+    )
     parser.add_argument("--disable-paper-api", action="store_true", help="Disable Phase 4 paper API collection for lab_automation multi-agent runs.")
     parser.add_argument(
         "--paper-api-retmax",
@@ -1015,6 +1178,8 @@ def main(argv: list[str] | None = None) -> int:
     preference_profile = store.audience_preference_profile(topic=args.topic, cadence=args.cadence)
     log_step(f"loaded Interested preference profile: total_feedback={preference_profile.get('total_feedback', 0)}")
     use_multi_agent = args.topic == LAB_AUTOMATION_TOPIC and not args.single_agent
+    if args.only_phase and not use_multi_agent:
+        raise ValueError("--only-phase is available only for the lab_automation multi-agent workflow")
     if use_multi_agent:
         payload = run_lab_automation_multi_agent(
             args=args,

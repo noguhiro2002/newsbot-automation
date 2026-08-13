@@ -69,7 +69,7 @@ NEWSBOT_LAB_AUTOMATION_MASTER_MODEL=
 NEWSBOT_LAB_AUTOMATION_MASTER_REASONING_EFFORT=
 NEWSBOT_PAPER_API_RETMAX=
 NEWSBOT_NCBI_TOOL=newsbot_automation
-NEWSBOT_NCBI_EMAIL=
+NEWSBOT_NCBI_EMAIL=your-email@example.com
 NCBI_API_KEY=
 NEWSBOT_CROSSREF_MAILTO=
 NEWSBOT_API_CACHE_TTL_SECONDS=21600
@@ -85,9 +85,13 @@ Notes:
 - `NEWSBOT_CODEX_REASONING_EFFORT` accepts `low`, `medium`, `high`, `xhigh`, or `max`.
 - Phase-specific model and reasoning values override the common Codex settings for the `lab_automation` multi-phase workflow.
 - `NEWSBOT_PAPER_API_RETMAX` controls Phase 4 candidates per paper API and defaults to 50.
-- Register `NEWSBOT_NCBI_TOOL` and the developer `NEWSBOT_NCBI_EMAIL` with NCBI before enabling PubMed. `NCBI_API_KEY` is optional.
-- NCBI requests are limited to 3/s without an API key and 10/s with one. `NEWSBOT_CROSSREF_MAILTO` selects Crossref's polite pool.
+- `NEWSBOT_NCBI_TOOL` is a no-spaces application identifier; `newsbot_automation` is suitable for this deployment.
+- `NEWSBOT_NCBI_EMAIL` is a valid contact address for the software developer or maintainer, not a third-party end user.
+- For continued PubMed use, register the tool name and email with `eutilities@ncbi.nlm.nih.gov`, including the developer or organization name.
+- `NCBI_API_KEY` is optional. This client remains capped at 3 requests/second even when a key is configured and batches PubMed IDs into EFetch requests.
+- `NEWSBOT_CROSSREF_MAILTO` selects Crossref's polite pool.
 - API responses are cached under `data/api-cache/` for `NEWSBOT_API_CACHE_TTL_SECONDS`.
+- The legacy arXiv API is limited to one request every three seconds and one connection at a time. A lock under `data/api-cache/` shares rate limiting across runs on the same host.
 - Leave `NEWSBOT_LOOKBACK_DAYS` blank to search since the previous successful run.
 
 ## 4. Initialize the Database
