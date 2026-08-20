@@ -1,0 +1,13 @@
+{
+  "sources": [
+    {"id": "bruker-ir", "name": "Bruker", "url": "https://ir.bruker.com/rss/pressrelease.aspx", "phase": "phase_3", "kind": "feed"},
+    {"id": "nist-news", "name": "NIST News", "url": "https://www.nist.gov/news-events/news/rss.xml", "phase": "phase_3", "kind": "feed"},
+    {"id": "nist-events", "name": "NIST Events", "url": "https://www.nist.gov/news-events/events/rss.xml", "phase": "phase_3", "kind": "feed"},
+    {"id": "argonne-alcf", "name": "Argonne ALCF", "url": "https://www.alcf.anl.gov/news/rss.xml", "phase": "phase_3", "kind": "feed"},
+    {"id": "pr-newswire", "name": "PR Newswire", "url": "https://www.prnewswire.com/rss/news-releases-list.rss", "phase": "phase_2", "kind": "feed"},
+    {"id": "business-wire", "name": "Business Wire", "url": "https://feed.businesswire.com/rss/home/?rss=G1QFDERJXkJeEFpQWA==", "phase": "phase_2", "kind": "feed"},
+    {"id": "pr-times", "name": "PR TIMES", "url": "https://prtimes.jp/main/html/rss/publish.rdf", "phase": "phase_2", "kind": "feed"},
+    {"id": "pr-times-company", "name": "PR TIMES company feed", "url_template": "https://prtimes.jp/companyrdf.php?company_id={id}", "ids_env": "NEWSBOT_PRTIMES_COMPANY_IDS", "phase": "phase_2", "kind": "feed"},
+    {"id": "atinary-sitemap", "name": "Atinary", "url": "https://atinary.com/sitemap.xml", "phase": "phase_3", "kind": "sitemap"}
+  ]
+}

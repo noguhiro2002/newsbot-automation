@@ -60,11 +60,15 @@ python scripts/generate_payload_openai.py \
 `*.codex.usage.json`の`usage`がnullの場合は、Codexが`turn.completed`まで到達しなかった失敗runです。
 
 ```text
-payloads/lab_automation_weekly_<timestamp>.phase_1.prompt.txt
-payloads/lab_automation_weekly_<timestamp>.phase_2.prompt.txt
-payloads/lab_automation_weekly_<timestamp>.phase_3.prompt.txt
+payloads/lab_automation_weekly_<timestamp>.phase_1.structured.prompt.txt
+payloads/lab_automation_weekly_<timestamp>.phase_1.broad.prompt.txt
+payloads/lab_automation_weekly_<timestamp>.phase_2.structured.prompt.txt
+payloads/lab_automation_weekly_<timestamp>.phase_2.broad.prompt.txt
+payloads/lab_automation_weekly_<timestamp>.phase_3.structured.prompt.txt
+payloads/lab_automation_weekly_<timestamp>.phase_3.broad.prompt.txt
 payloads/lab_automation_weekly_<timestamp>.phase_4.paper_api.json
-payloads/lab_automation_weekly_<timestamp>.phase_4.prompt.txt
+payloads/lab_automation_weekly_<timestamp>.phase_4.api.prompt.txt
+payloads/lab_automation_weekly_<timestamp>.phase_4.broad.prompt.txt
 payloads/lab_automation_weekly_<timestamp>.master.prompt.txt
 ```
 
@@ -143,12 +147,16 @@ scripts/run_llm_model_audit.sh \
   --execute
 ```
 
-Phase 4は既定で arXiv / PubMed / bioRxiv / medRxiv / Crossref APIから論文候補を取得し、候補JSONをPhase 4 promptへ埋め込みます。従来のCodex prompt-only探索に戻したい場合は、`--disable-paper-api`を指定します。
+Phase 4は、arXiv / PubMed / bioRxiv / medRxiv / ChemRxiv / Crossref APIの全通過候補をbatch判定するAPIレーンと、API候補・API query・watchlist・他Phase出力を受け取らないBroadレーンを別Codexセッションで並列実行します。両レーンはDOI、canonical URL、正規化titleで統合し、`api` / `broad` / 両方の来歴を保存します。bioRxiv / medRxivは30件単位の全ページを走査してから共通意味判定へ進みます。ChemRxivはCrossref `posted-content`だけを機械取得経路として使用し、現行・旧形式のChemRxiv DOIを判定してversion表記を除いた論文単位で統合します。`--disable-paper-api`指定時もBroadレーンは実行します。
 PubMedを使うには、NCBIへ登録済みの`NEWSBOT_NCBI_TOOL`と`NEWSBOT_NCBI_EMAIL`を設定します。toolは空白を含まないアプリ識別名（例: `newsbot_automation`）、emailは運用者・開発者本人の有効な連絡先です。両方の値と開発者または組織名を`eutilities@ncbi.nlm.nih.gov`へ連絡して登録します。APIキーはHTTP requestだけに使われ、coverage・prompt・Codex logへ保存しません。clientはNCBI/Crossrefのrate limitとretry/backoff、および秘密を含まないAPI cacheを適用します。
 
 NCBI E-utilitiesはAPI keyの有無にかかわらず3 request/秒以下に固定し、PubMed IDは1回のEFetchへまとめます。arXiv legacy APIは3秒に1回以下・同時接続1本に制限します。`data/api-cache/`配下のlockにより、同一ホスト上で複数runが重なっても間隔と単一接続を共有します。429/5xxと一時的な通信失敗にはrate limitを維持したままretry/backoffを適用します。
 
 Phase 4は各API候補にIDを付け、採用候補の`paper_api_candidate_ids`または除外候補の`excluded_api_candidates`へ必ず振り分けます。未判定・二重判定・未知IDがあれば生成を失敗させます。除外結果は`payloads/lab_automation_weekly_<timestamp>.phase_4.rejections.json`にも保存されます。Masterには採用候補と集計だけを渡し、詳細な除外一覧は監査artifactに保持します。
+
+PubMedとCrossrefも、正規化後にarXivと共通の高再現率な一次意味判定を通します。API別の取得・採用・除外・メタデータ不足件数と、一次除外理由・スコアは`.phase_4.paper_api.json`および`.phase_4.rejections.json`で確認できます。Phase 4は物理ロボット接続の有無だけで判断せず、ChemWorld型環境、科学Digital Twin、AI Scientist評価環境も、具体的な実験action・state・resource・replay・auditがあれば対象にします。
+
+Phase 1〜3はstructuredとbroadを、Phase 4はAPIとbroadを、別々の`codex exec --ephemeral`として並列実行します。broadには他レーンの検索語・watchlist・候補・feed候補を渡しません。各レーンは失敗時に1回再試行し、片方だけ成功した場合も継続します。RSS/Atom/sitemap候補はPhase 1〜3のstructuredだけへ渡し、Pythonがcanonical URL、duplicate key、正規化タイトルで統合して`discovery_modes`を保存します。Phase 5はPhase 1〜4の出力を受け取らず、国内外・公式・PR・論文を横断して探索します。Phase 1〜5には固定候補上限を設けず、既定30件はMaster・Reviewer選定段階だけに適用します。Phase 5だけを確認する場合は`--only-phase phase_5`を使用できます。
 
 Phase 4だけをテストする場合は、次を実行します。Master builder、最終payload生成、Discord投稿は行いません。
 
@@ -160,7 +168,7 @@ Phase 4だけをテストする場合は、次を実行します。Master builde
   --only-phase phase_4 \
   --phase-model phase_4=gpt-5.6-luna \
   --phase-reasoning phase_4=max \
-  --codex-timeout 3600
+  --codex-timeout 5400
 ```
 
 ### 固定候補poolによるMaster paired audit
@@ -248,6 +256,17 @@ python scripts/generate_payload_openai.py \
   --submit-dry-run
 ```
 
+本番DB、feed cache、成功Run時刻、Discordから完全に分離してPhase 1〜5とMasterを実行する場合は、`--isolated-dry-run`を使用します。本番DBは実行開始時にdry-run専用SQLiteへsnapshotされるため、既存の人判断フィードバックは判定に反映されますが、実行中のDB書き込みはsnapshotだけに保存されます。最終payload、Phase別artifact、監査情報、DB snapshotは`payloads/`へ残ります。
+
+```bash
+python scripts/generate_payload_openai.py \
+  --topic lab_automation \
+  --cadence weekly \
+  --lookback-days 7 \
+  --codex-timeout 5400 \
+  --isolated-dry-run
+```
+
 ## cronへ登録する
 
 ローカル版では付属のinstallerを使用します。
@@ -318,9 +337,9 @@ python scripts/generate_payload_openai.py \
 
 payload生成のreasoning effortは、`.env` の `NEWSBOT_CODEX_REASONING_EFFORT` に `low`, `medium`, `high`, `xhigh`, `max` のいずれかを指定できます。`lab_automation`のmulti-agent workflowでは、Phase別に `NEWSBOT_LAB_AUTOMATION_PHASE_1_MODEL`, `NEWSBOT_LAB_AUTOMATION_PHASE_1_REASONING_EFFORT` のように設定できます。Masterは `NEWSBOT_LAB_AUTOMATION_MASTER_MODEL`, `NEWSBOT_LAB_AUTOMATION_MASTER_REASONING_EFFORT` です。
 
-Phase 4の論文API取得件数は `--paper-api-retmax` または `.env` の `NEWSBOT_PAPER_API_RETMAX` で指定できます。PubMed用の `NCBI_API_KEY` は任意ですが、登録済みtool/emailは必須です。Crossrefでは`NEWSBOT_CROSSREF_MAILTO`の設定を推奨します。
+`--paper-api-retmax` / `NEWSBOT_PAPER_API_RETMAX` は旧名称を維持したPubMed/Crossref走査budgetであり、意味判定通過後の候補上限ではありません。arXivは対象期間を日単位に分け、投稿日・対象カテゴリ・広い自律実験シグナルで取得した後、ローカルの高再現率filterを通します。LLM判定は `--phase-4-llm-batch-size` または `NEWSBOT_PHASE_4_LLM_BATCH_SIZE`（既定50件）ごとに分割され、通過候補を切り捨てず全batchを判定後に統合します。PubMed用の `NCBI_API_KEY` は任意ですが、登録済みtool/emailは必須です。Crossrefでは`NEWSBOT_CROSSREF_MAILTO`の設定を推奨します。
 
-生成時には、SQLite に保存された過去の `👍 Interested (n)` feedback からカテゴリ・タグ・ソースの傾向を抽出し、Codex へのプロンプトに含めます。Codex の出力後も同じ傾向を使って候補を並び替え、Reviewer に回す記事は優先度順の最大30本に絞ります。
+生成時には、SQLiteの`👍 Interested (n)`を読者信号として、編集者の採用・除外・配信取消・見逃しを別信号として扱います。編集判断は`NEWSBOT_FEEDBACK_LOOKBACK_WEEKS`（未設定時12）のrolling windowで再集計し、使用期間・件数・profile hashをRun監査へ保存します。不正な値は起動時に明示的エラーになります。見逃しはDiscordの管理者限定 `/newsbot_record_missed url:<URL>`、または `python -m newsbot.cli research-missed --url ... --reviewer ...` でURLだけから調査・登録できます。モデルは`NEWSBOT_MISSED_ITEM_MODEL`（既定`gpt-5.6-luna`）、reasoningは`NEWSBOT_MISSED_ITEM_REASONING_EFFORT`（既定`high`）で変更できます。
 
 cron で固定期間を検索したい場合は、`--lookback-days` を指定します。
 

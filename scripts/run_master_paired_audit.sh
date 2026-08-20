@@ -25,7 +25,7 @@ Options:
                         sol-medium, sol-high,
                         gpt55-high, or luna-high.
   --max-items N         Maximum Master selections. Default: 30
-  --codex-timeout SEC   Timeout per Master turn. Default: 3600
+  --codex-timeout SEC   Timeout per Master turn. Default: 5400
   --stop-on-error       Stop after the first failed Master turn.
   --help                Show this help.
 
@@ -62,7 +62,7 @@ seeds=(101 202 303)
 custom_seeds=0
 only_condition=""
 max_items=30
-codex_timeout=3600
+codex_timeout=5400
 execute_runs=0
 stop_on_error=0
 

@@ -113,6 +113,10 @@ def weekly_period_range(now: datetime | None = None) -> str:
     return f"{start:%Y/%m/%d} ~ {current:%Y/%m/%d}"
 
 
+def order_weekly_drafts(drafts: list[ArticleDraft]) -> list[ArticleDraft]:
+    return [draft for draft in drafts if draft.content_kind not in {"event_announcement", "event_occurrence"}] + [draft for draft in drafts if draft.content_kind in {"event_announcement", "event_occurrence"}]
+
+
 def render_weekly_digest_overview(drafts: list[ArticleDraft], now: datetime | None = None) -> str:
     topic = topic_label(drafts[0].topic) if drafts else "News"
     lines = [
@@ -120,8 +124,24 @@ def render_weekly_digest_overview(drafts: list[ArticleDraft], now: datetime | No
         weekly_period_range(now),
         "",
     ]
-    for index, draft in enumerate(drafts, start=1):
-        lines.append(f"{index}. {draft.title_edited or draft.title_original}")
+    ordered = order_weekly_drafts(drafts)
+    news = [draft for draft in ordered if draft.content_kind not in {"event_announcement", "event_occurrence"}]
+    events = [draft for draft in ordered if draft.content_kind in {"event_announcement", "event_occurrence"}]
+    current_index = 1
+    if news:
+        lines.append("News")
+        for draft in news:
+            lines.append(f"{current_index}. {draft.title_edited or draft.title_original}")
+            current_index += 1
+    if events:
+        if news:
+            lines.append("")
+        lines.append("Events")
+        for draft in events:
+            date = draft.event_date_start
+            date_suffix = f" ({date}{' - ' + draft.event_date_end if draft.event_date_end and draft.event_date_end != date else ''})" if date else ""
+            lines.append(f"{current_index}. {draft.title_edited or draft.title_original}{date_suffix}")
+            current_index += 1
     lines.extend(
         [
             "",
@@ -134,15 +154,18 @@ def render_weekly_digest_overview(drafts: list[ArticleDraft], now: datetime | No
 def render_weekly_detail_message(draft: ArticleDraft, index: int, *, leading_gap: bool = False) -> str:
     title = truncate(draft.title_edited or draft.title_original, 300)
     body = truncate(draft.body_edited or draft.body_original, 1400)
-    message = "\n".join(
-        [
+    detail_lines = [
             f"{index}. **{title}**",
             "",
             body,
-            "",
-            f"Source: {draft.source_url}",
-        ]
-    ).strip()
+    ]
+    if draft.content_kind in {"event_announcement", "event_occurrence"} and draft.event_date_start:
+        event_range = draft.event_date_start
+        if draft.event_date_end and draft.event_date_end != draft.event_date_start:
+            event_range += f" - {draft.event_date_end}"
+        detail_lines.extend(["", f"Event date: {event_range}"])
+    detail_lines.extend(["", f"Source: {draft.source_url}"])
+    message = "\n".join(detail_lines).strip()
     if leading_gap:
         return "\u200b\n\n" + message
     return message

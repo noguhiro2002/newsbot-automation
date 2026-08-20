@@ -1025,6 +1025,14 @@ site:<organization-domain> "バイオファウンドリ"
 * published_dateは、canonical sourceの公開日をYYYY-MM-DDで記録してください。
 * duplicate_keyは、研究・事業・施設・製品発表を正規化した短い英語キーにしてください。
 
+## Feed lane input and lane isolation
+
+この呼び出しはstructuredレーン専用です。広域検索は別の独立Codexセッションが行うため、ここでは実行しないでください。
+
+開始時にPythonが取得したfeed候補を以下に示します。これは発見入口であり、本文・日付・公式性・Lab Automationとの直接性を必ず検証してください。採用したfeed候補は `discovery_mode: "feed"`, `discovery_modes: ["feed"]` としてください。通常の構造化検索でも同じイベントを発見した場合は両方を保存してください。
+
+{{FEED_CANDIDATES_JSON}}
+
 ## Output Contract
 
 最終Newsbot payloadは作らないでください。返答は単一のJSON objectだけにしてください。Markdown、コードフェンス、説明文は不要です。
@@ -1045,11 +1053,18 @@ site:<organization-domain> "バイオファウンドリ"
       "evidence": "...",
       "confidence": 0.0,
       "canonical_source_checked": true,
+      "discovery_mode": "structured",
+      "discovery_modes": ["structured"],
       "duplicate_key": "normalized-event-name"
     }
   ],
   "search_coverage": {
     "queries_run": ["..."],
+    "structured_queries_run": ["..."],
+    "broad_queries_run": [],
+    "structured_candidate_count": 0,
+    "broad_candidate_count": 0,
+    "merged_candidate_count": 0,
     "notable_zero_result_queries": ["..."],
     "limitations": "..."
   }
@@ -1062,5 +1077,7 @@ site:<organization-domain> "バイオファウンドリ"
 * Science Portalや展示会ページを発見入口として使った場合でも、公式URLに解決できた場合は、`source` と `url` は公式発表主体に合わせてください。
 * PR配信ページしか見つからなかった場合は、`evidence` に `PR distribution page used because no official source was found after canonical source search` と明記してください。
 * `canonical_source_checked` は、公式URL解決を実施した場合のみ true にしてください。
+* `discovery_mode` は主な発見経路を `"structured"` または `"feed"` で記録してください。`discovery_modes` は重複排除前に確認できた全経路を配列で記録してください。
+* `structured_candidate_count` と `broad_candidate_count` はレーン間統合前の候補数、`merged_candidate_count` は統合後の最終候補数です。同一イベントを両レーンで見つけた場合は両方のレーン件数に数え、統合後は1件として数えてください。
 * `evidence` には、Lab Automationとの直接性を支える具体語、たとえば「研究設備の自動化・遠隔化・自律化」「スマートクラウドラボ」「AI-ready data」「共同利用開始」「液体ハンドリングロボット」「装置連携」「研究データ基盤」などを含めてください。
 * 候補が0件の場合でも、空の `candidates` と、実行した検索・限界を `search_coverage` に記録してください。

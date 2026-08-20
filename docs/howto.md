@@ -68,6 +68,7 @@ NEWSBOT_LAB_AUTOMATION_PHASE_1_REASONING_EFFORT=
 NEWSBOT_LAB_AUTOMATION_MASTER_MODEL=
 NEWSBOT_LAB_AUTOMATION_MASTER_REASONING_EFFORT=
 NEWSBOT_PAPER_API_RETMAX=
+NEWSBOT_PHASE_4_LLM_BATCH_SIZE=50
 NEWSBOT_NCBI_TOOL=newsbot_automation
 NEWSBOT_NCBI_EMAIL=your-email@example.com
 NCBI_API_KEY=
@@ -84,7 +85,8 @@ Notes:
 - Leave `NEWSBOT_CODEX_MODEL` blank to use the Codex CLI default.
 - `NEWSBOT_CODEX_REASONING_EFFORT` accepts `low`, `medium`, `high`, `xhigh`, or `max`.
 - Phase-specific model and reasoning values override the common Codex settings for the `lab_automation` multi-phase workflow.
-- `NEWSBOT_PAPER_API_RETMAX` controls Phase 4 candidates per paper API and defaults to 50.
+- `NEWSBOT_PAPER_API_RETMAX` is a legacy-named PubMed/Crossref scan budget and defaults to 50; it does not truncate candidates after semantic filtering.
+- `NEWSBOT_PHASE_4_LLM_BATCH_SIZE` controls API candidates per Phase 4 LLM call and defaults to 50. Larger candidate sets are fully evaluated in multiple batches and merged.
 - `NEWSBOT_NCBI_TOOL` is a no-spaces application identifier; `newsbot_automation` is suitable for this deployment.
 - `NEWSBOT_NCBI_EMAIL` is a valid contact address for the software developer or maintainer, not a third-party end user.
 - For continued PubMed use, register the tool name and email with `eutilities@ncbi.nlm.nih.gov`, including the developer or organization name.
@@ -121,12 +123,14 @@ python scripts/generate_payload_openai.py --topic lab_automation --submit-review
 What happens:
 
 1. The script loads the historical `Interested` preference profile from SQLite.
-2. For `lab_automation`, Codex CLI runs Phases 1–3 for Web discovery while Python collects paper API candidates for Phase 4.
-3. Codex CLI selects Phase 4 papers, and the Master step merges all phase outputs.
+2. For `lab_automation`, Codex CLI runs Phases 1–3 for Web discovery.
+3. Phase 4 runs the batched API-review lane and an API-blind broad paper-search lane concurrently; Phase 5 then performs an independent cross-phase broad sweep, and the Master merges all phase outputs.
 4. Python validates and deterministically reranks the payload with the same feedback profile.
 5. Artifacts are saved under `payloads/`, and up to 30 drafts are posted to the Discord review channel.
 
-Phase 4 retrieves candidates from arXiv, PubMed, bioRxiv, medRxiv, and Crossref, applies period filtering and duplicate removal, and passes the resulting list to Codex CLI for relevance selection. Codex can use Web search as a fallback if the APIs fail or return no candidates.
+Phase 4 retrieves candidates from arXiv, PubMed, bioRxiv, medRxiv, ChemRxiv, and Crossref, applies the shared high-recall semantic prefilter, period filtering, and duplicate removal, and passes every qualifying candidate to the batched API-review lane without a post-filter count cap. In parallel, an independent broad lane receives none of the API candidates, API queries, watchlists, or earlier Phase output and searches papers/preprints from scratch. Python merges both lanes by DOI, canonical URL, and normalized title while preserving `api`/`broad` provenance. bioRxiv and medRxiv scan every 30-item API page before filtering. ChemRxiv uses Crossref `posted-content` as its sole machine-readable metadata route, accepts both current `10.26434/chemrxiv.` and legacy `10.26434/chemrxiv-` DOI formats, and merges `/vN`, `-vN`, and `.vN` versions at the work level. Crossref follows the documented public or polite pool limits and honors `Retry-After`.
+
+Phases 1–5 do not impose a fixed output-candidate ceiling. All verified, in-scope candidates proceed to Master; the configured maximum (30 by default) applies only at the final Master/reviewer-selection stage. API page-scan safety bounds and Phase 4 LLM batch size remain operational controls and do not discard qualifying candidates after filtering.
 
 The paper API client applies rate limits and retries retryable failures with backoff. Query metadata stored in coverage and prompts is redacted so that `NCBI_API_KEY` is never persisted or passed to Codex. Review the [Legal Notices](legal-notices.md) before operating PubMed retrieval.
 
@@ -233,6 +237,7 @@ Run these in Discord:
 - `/newsbot_refresh_reviews`
 - `/newsbot_prepare_weekly`
 - `/newsbot_collect_reviews`
+- `/newsbot_record_missed url:<URL>`
 
 ## 12. Verification
 

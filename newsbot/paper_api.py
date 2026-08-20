@@ -1,16 +1,19 @@
 from __future__ import annotations
 
+import email.utils
 import hashlib
 import json
 import os
 import re
+import tempfile
 import time
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 from dataclasses import asdict, dataclass
 from contextlib import contextmanager
-from datetime import date, datetime
+from contextvars import ContextVar
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Iterator
 from urllib.error import HTTPError, URLError
@@ -31,6 +34,130 @@ DEFAULT_PAPER_QUERIES = [
     "high-throughput experimentation",
 ]
 
+ARXIV_DISCOVERY_CATEGORIES = (
+    "cs.RO",
+    "cs.AI",
+    "cs.LG",
+    "physics.chem-ph",
+    "physics.ins-det",
+    "cond-mat.mtrl-sci",
+)
+ARXIV_DISCOVERY_TERMS = (
+    "chemistry",
+    "chemical",
+    "laboratory",
+    "experiment",
+    "experimental",
+    "synthesis",
+    "materials",
+    "instrument",
+    "assay",
+)
+ARXIV_AUTOMATION_TERMS = (
+    "autonomous",
+    "robotic",
+    "automation",
+    "robot",
+    "agent",
+    "closed-loop",
+    "self-driving",
+    "controller",
+    "policy",
+    "active learning",
+    "high-throughput",
+    "replay",
+    "orchestration",
+)
+ARXIV_PAGE_SIZE = 100
+ARXIV_MAX_SCAN_RESULTS_PER_DAY = 500
+BIORXIV_PAGE_SIZE = 30
+BIORXIV_MAX_SCAN_RESULTS = 5000
+CHEMRXIV_MAX_SCAN_RESULTS = 2000
+CHEMRXIV_DOI_PREFIX = "10.26434"
+CHEMRXIV_DOI_PATTERN = re.compile(r"^10\.26434/chemrxiv[.-]", re.IGNORECASE)
+PAPER_RELEVANCE_THRESHOLD = 6
+PAPER_SPARSE_METADATA_RELEVANCE_THRESHOLD = 5
+PAPER_SPARSE_ABSTRACT_MIN_CHARS = 120
+POSITIVE_AUXILIARY_TERMS: ContextVar[tuple[str, ...]] = ContextVar("paper_positive_auxiliary_terms", default=())
+
+DIRECT_RELEVANCE_PHRASES = {
+    **{query: 10 for query in DEFAULT_PAPER_QUERIES},
+    "autonomous laboratory": 10,
+    "robotic chemistry": 10,
+    "robotic chemist": 10,
+    "autonomous chemistry": 10,
+    "chemistry agent": 8,
+    "scientific agent": 6,
+    "agent experimentation": 8,
+    "programmable chemical": 8,
+    "chemical world": 7,
+    "programmable scientific environment": 8,
+    "experimental environment": 7,
+    "scientific digital twin": 8,
+    "laboratory digital twin": 8,
+    "virtual laboratory": 7,
+    "ai scientist": 7,
+    "autonomous science agent": 8,
+    "scientific agent benchmark": 6,
+    "laboratory manipulation": 8,
+    "lab manipulation": 8,
+    "laboratory orchestration": 8,
+    "experimental steering": 8,
+    "adaptive experiment": 7,
+}
+DOMAIN_RELEVANCE_TERMS = (
+    "chemistry",
+    "chemical",
+    "laboratory",
+    " lab ",
+    "synthesis",
+    "materials",
+    "biology",
+    "biological",
+    "biotechnology",
+    "pharmaceutical",
+    "scientific experiment",
+    "assay",
+    "instrument",
+)
+AUTOMATION_RELEVANCE_TERMS = (
+    "autonomous",
+    "robotic",
+    "automation",
+    " robot ",
+    " agent",
+    "closed-loop",
+    "closed loop",
+    "high-throughput",
+    "high throughput",
+    "active learning",
+    "controller",
+    "policy switching",
+)
+EXECUTION_RELEVANCE_TERMS = (
+    "act and observe",
+    "action",
+    "execution",
+    "manipulation",
+    "workflow",
+    "experiment planning",
+    "decision",
+    "feedback",
+    "optimization",
+    "replay",
+    "audit",
+    "uncertainty",
+    "safety",
+    "resource change",
+    "state transition",
+    "digital twin",
+    "simulation environment",
+    "experimental environment",
+    "benchmark environment",
+    "trajectory",
+    "observation model",
+)
+
 USER_AGENT = "newsbot-automation/0.2 (+https://github.com/noguhiro2002/newsbot-automation)"
 UrlOpen = Callable[..., Any]
 SENSITIVE_QUERY_PARAMETERS = frozenset(
@@ -49,6 +176,9 @@ RETRYABLE_HTTP_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
 DEFAULT_API_CACHE_TTL_SECONDS = 6 * 60 * 60
 NCBI_REQUESTS_PER_SECOND = 3
 ARXIV_SECONDS_BETWEEN_REQUESTS = 3
+BIORXIV_REQUESTS_PER_SECOND = 1
+CROSSREF_PUBLIC_REQUESTS_PER_SECOND = 5
+CROSSREF_POLITE_REQUESTS_PER_SECOND = 10
 
 
 @dataclass(frozen=True)
@@ -130,6 +260,7 @@ class ApiRequestContext:
     arxiv_limiter: RequestRateLimiter
     ncbi_limiter: RequestRateLimiter
     crossref_limiter: RequestRateLimiter
+    biorxiv_limiter: RequestRateLimiter | None = None
 
     def limiter_for(self, url: str) -> RequestRateLimiter | None:
         hostname = (urllib.parse.urlsplit(url).hostname or "").lower()
@@ -139,6 +270,8 @@ class ApiRequestContext:
             return self.ncbi_limiter
         if hostname == "api.crossref.org":
             return self.crossref_limiter
+        if hostname == "api.biorxiv.org":
+            return self.biorxiv_limiter
         return None
 
 
@@ -165,7 +298,11 @@ def collect_paper_api_candidates(
     opener: UrlOpen | None = None,
     cache_dir: str | Path | None = None,
     cache_ttl_seconds: int = DEFAULT_API_CACHE_TTL_SECONDS,
+    positive_auxiliary_terms: list[str] | tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
+    positive_terms_token = POSITIVE_AUXILIARY_TERMS.set(
+        tuple(term.casefold().strip() for term in (positive_auxiliary_terms or []) if len(term.strip()) >= 3)
+    )
     start_date, end_date = parse_period_dates(period)
     limit = max(1, retmax)
     fetcher = opener or urllib.request.urlopen
@@ -188,17 +325,33 @@ def collect_paper_api_candidates(
             else None,
         ),
         crossref_limiter=RequestRateLimiter(
-            (10 if crossref_mailto else 5) if production_requests else 1000
+            (
+                CROSSREF_POLITE_REQUESTS_PER_SECOND
+                if crossref_mailto
+                else CROSSREF_PUBLIC_REQUESTS_PER_SECOND
+            )
+            if production_requests
+            else 1000
+        ),
+        biorxiv_limiter=RequestRateLimiter(
+            BIORXIV_REQUESTS_PER_SECOND if production_requests else 1000,
+            shared_lock_path=(shared_rate_limit_dir / ".biorxiv-rate-limit.lock")
+            if shared_rate_limit_dir
+            else None,
         ),
     )
     coverage: dict[str, Any] = {
         "period": period,
         "start_date": start_date.isoformat(),
         "end_date": end_date.isoformat(),
-        "retmax_per_api": limit,
+        "scan_budget_per_query_source": limit,
+        "post_filter_candidate_limit": None,
         "request_policy": {
             "arxiv": "at most one request every three seconds; one connection at a time",
             "pubmed": "at most three requests per second, including when an API key is configured",
+            "biorxiv_medrxiv": "conservative client limit of at most one request per second",
+            "chemrxiv": "Crossref posted-content only; uses the Crossref public or polite pool policy and honors Retry-After",
+            "crossref": "public pool at most five requests per second or polite pool at most ten when mailto is configured; client serializes requests and honors Retry-After",
         },
         "api_queries_run": [],
         "api_failures": [],
@@ -206,8 +359,21 @@ def collect_paper_api_candidates(
     }
 
     candidates: list[PaperCandidate] = []
+    prefilter_excluded_candidates: list[dict[str, Any]] = []
     collectors = [
-        ("arxiv", lambda: fetch_arxiv_candidates(start_date, end_date, limit, timeout, fetcher, coverage, request_context)),
+        (
+            "arxiv",
+            lambda: fetch_arxiv_candidates(
+                start_date,
+                end_date,
+                limit,
+                timeout,
+                fetcher,
+                coverage,
+                request_context,
+                prefilter_excluded_candidates,
+            ),
+        ),
         (
             "pubmed",
             lambda: fetch_pubmed_candidates(
@@ -221,24 +387,63 @@ def collect_paper_api_candidates(
                 ncbi_tool,
                 ncbi_email,
                 request_context,
+                prefilter_excluded_candidates,
             ),
         ),
         (
             "biorxiv",
             lambda: fetch_biorxiv_family_candidates(
-                "biorxiv", start_date, end_date, limit, timeout, fetcher, coverage, request_context
+                "biorxiv",
+                start_date,
+                end_date,
+                limit,
+                timeout,
+                fetcher,
+                coverage,
+                request_context,
+                prefilter_excluded_candidates,
             ),
         ),
         (
             "medrxiv",
             lambda: fetch_biorxiv_family_candidates(
-                "medrxiv", start_date, end_date, limit, timeout, fetcher, coverage, request_context
+                "medrxiv",
+                start_date,
+                end_date,
+                limit,
+                timeout,
+                fetcher,
+                coverage,
+                request_context,
+                prefilter_excluded_candidates,
+            ),
+        ),
+        (
+            "chemrxiv",
+            lambda: fetch_chemrxiv_candidates(
+                start_date,
+                end_date,
+                limit,
+                timeout,
+                fetcher,
+                coverage,
+                crossref_mailto,
+                request_context,
+                prefilter_excluded_candidates,
             ),
         ),
         (
             "crossref",
             lambda: fetch_crossref_candidates(
-                start_date, end_date, limit, timeout, fetcher, coverage, crossref_mailto, request_context
+                start_date,
+                end_date,
+                limit,
+                timeout,
+                fetcher,
+                coverage,
+                crossref_mailto,
+                request_context,
+                prefilter_excluded_candidates,
             ),
         ),
     ]
@@ -256,12 +461,15 @@ def collect_paper_api_candidates(
     if coverage["api_failures"]:
         failures = ", ".join(f"{item['api_source']}: {item['error']}" for item in coverage["api_failures"])
         coverage["limitations"] = f"Some paper APIs failed and were skipped: {failures}"
-    return {
+    result = {
         "period": period,
         "queries": DEFAULT_PAPER_QUERIES,
         "candidates": [asdict(candidate) for candidate in deduped],
+        "prefilter_excluded_candidates": prefilter_excluded_candidates,
         "coverage": coverage,
     }
+    POSITIVE_AUXILIARY_TERMS.reset(positive_terms_token)
+    return result
 
 
 def fetch_arxiv_candidates(
@@ -272,25 +480,81 @@ def fetch_arxiv_candidates(
     opener: UrlOpen,
     coverage: dict[str, Any],
     request_context: ApiRequestContext,
+    prefilter_excluded_candidates: list[dict[str, Any]] | None = None,
 ) -> list[PaperCandidate]:
-    candidates: list[PaperCandidate] = []
-    per_query_limit = max(1, min(10, retmax))
-    for query in DEFAULT_PAPER_QUERIES:
-        if len(candidates) >= retmax:
-            break
-        search_query = f'all:"{query}"'
-        params = {
-            "search_query": search_query,
-            "start": "0",
-            "max_results": str(per_query_limit),
-            "sortBy": "submittedDate",
-            "sortOrder": "descending",
-        }
-        url = "https://export.arxiv.org/api/query?" + urllib.parse.urlencode(params)
-        record_api_query(coverage, api_source="arxiv", query=query, url=url)
-        body = fetch_url(url, timeout, opener, context=request_context)
-        candidates.extend(parse_arxiv_atom(body, query))
-    return candidates[:retmax]
+    scanned: list[PaperCandidate] = []
+    categories = " OR ".join(f"cat:{category}" for category in ARXIV_DISCOVERY_CATEGORIES)
+    domain_terms = " OR ".join(f"all:{term}" for term in ARXIV_DISCOVERY_TERMS)
+    automation_terms = " OR ".join(
+        f'all:"{term}"' if " " in term else f"all:{term}"
+        for term in ARXIV_AUTOMATION_TERMS
+    )
+    daily_scan_counts: dict[str, int] = {}
+    current_date = start_date
+    while current_date <= end_date:
+        date_range = (
+            f"submittedDate:[{current_date:%Y%m%d}0000 TO "
+            f"{current_date:%Y%m%d}2359]"
+        )
+        search_query = (
+            f"({categories}) AND ({domain_terms}) AND ({automation_terms}) "
+            f"AND {date_range}"
+        )
+        start = 0
+        while start < ARXIV_MAX_SCAN_RESULTS_PER_DAY:
+            page_size = min(
+                ARXIV_PAGE_SIZE, ARXIV_MAX_SCAN_RESULTS_PER_DAY - start
+            )
+            params = {
+                "search_query": search_query,
+                "start": str(start),
+                "max_results": str(page_size),
+                "sortBy": "submittedDate",
+                "sortOrder": "descending",
+            }
+            url = "https://export.arxiv.org/api/query?" + urllib.parse.urlencode(params)
+            record_api_query(
+                coverage,
+                api_source="arxiv",
+                query=f"date/category sweep date={current_date.isoformat()} offset={start}",
+                url=url,
+            )
+            body = fetch_url(url, timeout, opener, context=request_context)
+            page = parse_arxiv_atom(body, "date-category-semantic-filter")
+            scanned.extend(page)
+            start += len(page)
+            if len(page) < page_size:
+                break
+        daily_scan_counts[current_date.isoformat()] = start
+        current_date += timedelta(days=1)
+
+    in_period = dedupe_candidates(
+        filter_candidates_by_period(scanned, start_date, end_date)
+    )
+    returned = semantic_prefilter_candidates(
+        in_period,
+        api_source="arxiv",
+        retmax=None,
+        coverage=coverage,
+        prefilter_excluded_candidates=prefilter_excluded_candidates,
+    )
+    semantic_audit = coverage["semantic_prefilter"]["arxiv"]
+
+    coverage["arxiv_discovery"] = {
+        "strategy": "submitted-date and category sweep followed by local semantic scoring",
+        "categories": list(ARXIV_DISCOVERY_CATEGORIES),
+        "domain_terms": list(ARXIV_DISCOVERY_TERMS),
+        "automation_terms": list(ARXIV_AUTOMATION_TERMS),
+        "scan_limit_per_day": ARXIV_MAX_SCAN_RESULTS_PER_DAY,
+        "daily_scan_counts": daily_scan_counts,
+        "scanned_candidate_count": len(scanned),
+        "in_period_candidate_count": len(in_period),
+        "relevance_threshold": PAPER_RELEVANCE_THRESHOLD,
+        "relevant_candidate_count": semantic_audit["relevant_candidate_count"],
+        "returned_candidate_count": len(returned),
+        "source_limit_excluded_count": semantic_audit["source_limit_excluded_count"],
+    }
+    return returned
 
 
 def parse_arxiv_atom(body: bytes | str, matched_query: str) -> list[PaperCandidate]:
@@ -336,15 +600,18 @@ def fetch_pubmed_candidates(
     ncbi_tool: str,
     ncbi_email: str,
     request_context: ApiRequestContext,
+    prefilter_excluded_candidates: list[dict[str, Any]] | None = None,
 ) -> list[PaperCandidate]:
     if not ncbi_tool.strip() or not ncbi_email.strip():
         raise ValueError(
             "PubMed requires registered NEWSBOT_NCBI_TOOL and NEWSBOT_NCBI_EMAIL values"
         )
     ids: list[str] = []
-    per_query_limit = max(1, min(10, retmax))
+    seen_ids: set[str] = set()
+    raw_limit = max(retmax, min(retmax * 2, retmax + 50))
+    per_query_limit = max(1, min(10, raw_limit))
     for query in DEFAULT_PAPER_QUERIES:
-        if len(ids) >= retmax:
+        if len(ids) >= raw_limit:
             break
         term = f'"{query}" AND ("{start_date:%Y/%m/%d}"[Date - Publication] : "{end_date:%Y/%m/%d}"[Date - Publication])'
         params = {
@@ -359,15 +626,31 @@ def fetch_pubmed_candidates(
             params["api_key"] = ncbi_api_key
         url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?" + urllib.parse.urlencode(params)
         record_api_query(coverage, api_source="pubmed", query=query, url=url)
-        data = json.loads(
-            fetch_url(url, timeout, opener, context=request_context).decode(
-                "utf-8", errors="replace"
-            )
+        data = fetch_json_url(
+            url,
+            timeout,
+            opener,
+            context=request_context,
+            coverage=coverage,
+            api_source="pubmed",
         )
-        ids.extend(data.get("esearchresult", {}).get("idlist", []))
-    ids = list(dict.fromkeys(ids))[:retmax]
+        for raw_id in data.get("esearchresult", {}).get("idlist", []):
+            pubmed_id = str(raw_id).strip()
+            if not pubmed_id or pubmed_id in seen_ids:
+                continue
+            seen_ids.add(pubmed_id)
+            ids.append(pubmed_id)
+            if len(ids) >= raw_limit:
+                break
+    ids = ids[:raw_limit]
     if not ids:
-        return []
+        return semantic_prefilter_candidates(
+            [],
+            api_source="pubmed",
+            retmax=None,
+            coverage=coverage,
+            prefilter_excluded_candidates=prefilter_excluded_candidates,
+        )
     params = {
         "db": "pubmed",
         "email": ncbi_email.strip(),
@@ -379,7 +662,16 @@ def fetch_pubmed_candidates(
         params["api_key"] = ncbi_api_key
     url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?" + urllib.parse.urlencode(params)
     record_api_query(coverage, api_source="pubmed", query="efetch", url=url)
-    return parse_pubmed_xml(fetch_url(url, timeout, opener, context=request_context))
+    parsed = parse_pubmed_xml(
+        fetch_url(url, timeout, opener, context=request_context)
+    )
+    return semantic_prefilter_candidates(
+        parsed,
+        api_source="pubmed",
+        retmax=None,
+        coverage=coverage,
+        prefilter_excluded_candidates=prefilter_excluded_candidates,
+    )
 
 
 def parse_pubmed_xml(body: bytes | str) -> list[PaperCandidate]:
@@ -434,10 +726,14 @@ def fetch_biorxiv_family_candidates(
     opener: UrlOpen,
     coverage: dict[str, Any],
     request_context: ApiRequestContext,
+    prefilter_excluded_candidates: list[dict[str, Any]] | None = None,
 ) -> list[PaperCandidate]:
     cursor = 0
-    candidates: list[PaperCandidate] = []
-    while len(candidates) < retmax:
+    scanned: list[PaperCandidate] = []
+    raw_record_count = 0
+    metadata_missing_count = 0
+    reported_total: int | None = None
+    while cursor < BIORXIV_MAX_SCAN_RESULTS:
         url = f"https://api.biorxiv.org/details/{server}/{start_date.isoformat()}/{end_date.isoformat()}/{cursor}"
         record_api_query(
             coverage, api_source=server, query=f"{server} details", url=url
@@ -450,16 +746,58 @@ def fetch_biorxiv_family_candidates(
         collection = data.get("collection") or []
         if not collection:
             break
+        raw_record_count += len(collection)
         for item in collection:
             candidate = biorxiv_item_to_candidate(item, server)
-            if candidate and candidate_matches_queries(candidate):
-                candidates.append(candidate)
-                if len(candidates) >= retmax:
-                    break
-        if len(collection) < 100:
-            break
+            if candidate:
+                scanned.append(candidate)
+            else:
+                metadata_missing_count += 1
+        reported_total = biorxiv_reported_total(data) or reported_total
         cursor += len(collection)
-    return candidates[:retmax]
+        if reported_total is not None and cursor >= reported_total:
+            break
+        if len(collection) < BIORXIV_PAGE_SIZE:
+            break
+    in_period = filter_candidates_by_period(scanned, start_date, end_date)
+    returned = semantic_prefilter_candidates(
+        in_period,
+        api_source=server,
+        retmax=None,
+        coverage=coverage,
+        prefilter_excluded_candidates=prefilter_excluded_candidates,
+    )
+    coverage[f"{server}_discovery"] = {
+        "strategy": "date-range pagination followed by shared title/abstract semantic scoring",
+        "page_size": BIORXIV_PAGE_SIZE,
+        "scan_limit": BIORXIV_MAX_SCAN_RESULTS,
+        "reported_total": reported_total,
+        "raw_record_count": raw_record_count,
+        "normalized_candidate_count": len(scanned),
+        "metadata_missing_candidate_count": metadata_missing_count,
+        "in_period_candidate_count": len(in_period),
+        "returned_candidate_count": len(returned),
+        "scan_truncated": cursor >= BIORXIV_MAX_SCAN_RESULTS
+        and (reported_total is None or cursor < reported_total),
+    }
+    return returned
+
+
+def biorxiv_reported_total(data: dict[str, Any]) -> int | None:
+    messages = data.get("messages") or []
+    if not isinstance(messages, list):
+        return None
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        for key in ("total", "count"):
+            try:
+                value = int(message.get(key))
+            except (TypeError, ValueError):
+                continue
+            if value >= 0:
+                return value
+    return None
 
 
 def biorxiv_item_to_candidate(item: dict[str, Any], server: str) -> PaperCandidate | None:
@@ -483,6 +821,205 @@ def biorxiv_item_to_candidate(item: dict[str, Any], server: str) -> PaperCandida
     )
 
 
+def fetch_chemrxiv_candidates(
+    start_date: date,
+    end_date: date,
+    retmax: int,
+    timeout: int,
+    opener: UrlOpen,
+    coverage: dict[str, Any],
+    crossref_mailto: str,
+    request_context: ApiRequestContext,
+    prefilter_excluded_candidates: list[dict[str, Any]] | None = None,
+) -> list[PaperCandidate]:
+    discovery: dict[str, Any] = {
+        "strategy": (
+            "Crossref posted-content date-range sweep; local ChemRxiv DOI validation; "
+            "work-level version deduplication"
+        ),
+        "routes": {},
+    }
+    try:
+        route_candidates = fetch_chemrxiv_crossref_candidates(
+            start_date,
+            end_date,
+            timeout,
+            opener,
+            coverage,
+            crossref_mailto,
+            request_context,
+        )
+        discovery["routes"]["crossref_posted_content"] = {
+            "status": "ok",
+            **coverage.get("chemrxiv_route_audit", {}).get(
+                "crossref_posted_content", {}
+            ),
+        }
+    except Exception as exc:  # noqa: BLE001 - an API failure must not stop Phase 4.
+        record_api_failure(coverage, "chemrxiv_crossref", exc)
+        route_candidates = []
+        discovery["routes"]["crossref_posted_content"] = {
+            "status": "failed",
+            "candidate_count": 0,
+            "error": redact_sensitive_text(str(exc)),
+        }
+
+    in_period = filter_candidates_by_period(route_candidates, start_date, end_date)
+    deduped = dedupe_chemrxiv_candidates(in_period)
+    discovery.update(
+        {
+            "candidate_count_before_period_filter": len(route_candidates),
+            "candidate_count_in_period": len(in_period),
+            "candidate_count_after_doi_dedupe": len(deduped),
+            "doi_duplicate_count": len(in_period) - len(deduped),
+        }
+    )
+    coverage["chemrxiv_discovery"] = discovery
+    return semantic_prefilter_candidates(
+        deduped,
+        api_source="chemrxiv",
+        retmax=None,
+        coverage=coverage,
+        prefilter_excluded_candidates=prefilter_excluded_candidates,
+    )
+
+
+def fetch_chemrxiv_crossref_candidates(
+    start_date: date,
+    end_date: date,
+    timeout: int,
+    opener: UrlOpen,
+    coverage: dict[str, Any],
+    crossref_mailto: str,
+    request_context: ApiRequestContext,
+) -> list[PaperCandidate]:
+    candidates: list[PaperCandidate] = []
+    offset = 0
+    raw_record_count = 0
+    chemrxiv_record_count = 0
+    metadata_missing_count = 0
+    reported_total: int | None = None
+    scan_truncated = False
+    while raw_record_count < CHEMRXIV_MAX_SCAN_RESULTS:
+        rows = min(100, CHEMRXIV_MAX_SCAN_RESULTS - raw_record_count)
+        params = {
+            "filter": (
+                f"from-posted-date:{start_date.isoformat()},"
+                f"until-posted-date:{end_date.isoformat()},"
+                f"type:posted-content,prefix:{CHEMRXIV_DOI_PREFIX}"
+            ),
+            "rows": str(rows),
+            "offset": str(offset),
+            "sort": "published",
+            "order": "desc",
+        }
+        if crossref_mailto.strip():
+            params["mailto"] = crossref_mailto.strip()
+        url = "https://api.crossref.org/works?" + urllib.parse.urlencode(params)
+        record_api_query(
+            coverage,
+            api_source="chemrxiv_crossref",
+            query="ChemRxiv posted-content date-range sweep",
+            url=url,
+        )
+        data = fetch_json_url(
+            url,
+            timeout,
+            opener,
+            context=request_context,
+            coverage=coverage,
+            api_source="chemrxiv_crossref",
+        )
+        message = data.get("message") or {}
+        items = message.get("items") or []
+        try:
+            reported_total = int(message.get("total-results"))
+        except (TypeError, ValueError):
+            pass
+        if not items:
+            break
+        raw_record_count += len(items)
+        for item in items:
+            if not is_chemrxiv_doi(extract_doi(item.get("DOI"))):
+                continue
+            chemrxiv_record_count += 1
+            candidate = chemrxiv_crossref_item_to_candidate(item)
+            if candidate:
+                candidates.append(candidate)
+            else:
+                metadata_missing_count += 1
+        offset += len(items)
+        if (
+            (reported_total is not None and offset >= reported_total)
+            or len(items) < rows
+        ):
+            break
+    if raw_record_count >= CHEMRXIV_MAX_SCAN_RESULTS and (
+        reported_total is None or raw_record_count < reported_total
+    ):
+        scan_truncated = True
+    coverage.setdefault("chemrxiv_route_audit", {})[
+        "crossref_posted_content"
+    ] = {
+        "raw_record_count": raw_record_count,
+        "chemrxiv_record_count": chemrxiv_record_count,
+        "non_chemrxiv_record_count": raw_record_count - chemrxiv_record_count,
+        "metadata_missing_candidate_count": metadata_missing_count,
+        "candidate_count": len(candidates),
+        "reported_total": reported_total,
+        "scan_limit": CHEMRXIV_MAX_SCAN_RESULTS,
+        "scan_truncated": scan_truncated,
+    }
+    return candidates
+
+
+def chemrxiv_crossref_item_to_candidate(item: dict[str, Any]) -> PaperCandidate | None:
+    if not is_chemrxiv_doi(extract_doi(item.get("DOI"))):
+        return None
+    candidate = crossref_item_to_candidate(item, "chemrxiv-posted-content")
+    if candidate is None:
+        return None
+    return PaperCandidate(
+        **{
+            **asdict(candidate),
+            "source": "ChemRxiv",
+            "source_type": "preprint",
+            "api_source": "chemrxiv_crossref",
+            "published_date": crossref_posted_date(item) or candidate.published_date,
+        }
+    )
+
+
+def dedupe_chemrxiv_candidates(candidates: list[PaperCandidate]) -> list[PaperCandidate]:
+    seen: set[str] = set()
+    deduped: list[PaperCandidate] = []
+    for candidate in candidates:
+        doi = normalize_chemrxiv_doi(candidate.doi)
+        key = f"doi:{doi}" if doi else candidate_key(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(candidate)
+    return deduped
+
+
+def normalize_chemrxiv_doi(value: str) -> str:
+    doi = extract_doi(value).casefold()
+    if CHEMRXIV_DOI_PATTERN.match(doi):
+        return re.sub(r"(?:[./-]v)\d+$", "", doi)
+    return doi
+
+
+def is_chemrxiv_doi(value: str) -> bool:
+    return bool(CHEMRXIV_DOI_PATTERN.match(extract_doi(value).casefold()))
+
+
+def record_api_failure(coverage: dict[str, Any], api_source: str, exc: Exception) -> None:
+    coverage.setdefault("api_failures", []).append(
+        {"api_source": api_source, "error": redact_sensitive_text(str(exc))}
+    )
+
+
 def fetch_crossref_candidates(
     start_date: date,
     end_date: date,
@@ -492,11 +1029,14 @@ def fetch_crossref_candidates(
     coverage: dict[str, Any],
     crossref_mailto: str,
     request_context: ApiRequestContext,
+    prefilter_excluded_candidates: list[dict[str, Any]] | None = None,
 ) -> list[PaperCandidate]:
     candidates: list[PaperCandidate] = []
-    per_query_limit = max(1, min(10, retmax))
+    seen_candidate_keys: set[str] = set()
+    raw_limit = max(retmax, min(retmax * 2, retmax + 50))
+    per_query_limit = max(1, min(10, raw_limit))
     for query in DEFAULT_PAPER_QUERIES:
-        if len(candidates) >= retmax:
+        if len(candidates) >= raw_limit:
             break
         params = {
             "query.bibliographic": query,
@@ -517,8 +1057,20 @@ def fetch_crossref_candidates(
         for item in data.get("message", {}).get("items", []):
             candidate = crossref_item_to_candidate(item, query)
             if candidate:
+                key = candidate_key(candidate)
+                if key in seen_candidate_keys:
+                    continue
+                seen_candidate_keys.add(key)
                 candidates.append(candidate)
-    return candidates[:retmax]
+                if len(candidates) >= raw_limit:
+                    break
+    return semantic_prefilter_candidates(
+        candidates,
+        api_source="crossref",
+        retmax=None,
+        coverage=coverage,
+        prefilter_excluded_candidates=prefilter_excluded_candidates,
+    )
 
 
 def crossref_item_to_candidate(item: dict[str, Any], query: str) -> PaperCandidate | None:
@@ -581,6 +1133,50 @@ def fetch_url(
             retry_after = 0.0
         time.sleep(max(retry_after, min(30.0, float(2**attempt))))
     raise RuntimeError("API request retry loop exited unexpectedly")
+
+
+def fetch_json_url(
+    url: str,
+    timeout: int,
+    opener: UrlOpen,
+    *,
+    context: ApiRequestContext | None = None,
+    coverage: dict[str, Any] | None = None,
+    api_source: str = "",
+) -> Any:
+    """Fetch JSON and retry once after removing a malformed cached response."""
+    last_error: json.JSONDecodeError | None = None
+    for parse_attempt in range(2):
+        body = fetch_url(url, timeout, opener, context=context)
+        try:
+            return json.loads(body.decode("utf-8", errors="replace"))
+        except json.JSONDecodeError as exc:
+            last_error = exc
+            cache_removed = invalidate_api_cache(context, url)
+            if coverage is not None:
+                coverage.setdefault("api_cache_recoveries", []).append(
+                    {
+                        "api_source": api_source,
+                        "reason": "invalid_json",
+                        "cache_removed": cache_removed,
+                        "retry_attempted": parse_attempt == 0,
+                    }
+                )
+            if parse_attempt == 0:
+                continue
+    assert last_error is not None
+    raise last_error
+
+
+def invalidate_api_cache(context: ApiRequestContext | None, url: str) -> bool:
+    if context is None or context.cache_dir is None:
+        return False
+    path = api_cache_path(context.cache_dir, url)
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return False
+    return True
 
 
 def record_api_query(
@@ -662,8 +1258,23 @@ def write_api_cache(path: Path, body: bytes) -> None:
         path.parent.chmod(0o700)
     except OSError:
         pass
-    path.write_bytes(body)
-    os.chmod(path, 0o600)
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary_path = Path(handle.name)
+            handle.write(body)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary_path, 0o600)
+        os.replace(temporary_path, path)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
 
 
 def parse_retry_after(value: str | None) -> float:
@@ -672,7 +1283,13 @@ def parse_retry_after(value: str | None) -> float:
     try:
         return max(0.0, float(value))
     except ValueError:
-        return 0.0
+        try:
+            retry_at = email.utils.parsedate_to_datetime(value)
+            if retry_at.tzinfo is None:
+                retry_at = retry_at.astimezone()
+            return max(0.0, retry_at.timestamp() - time.time())
+        except (TypeError, ValueError, OverflowError):
+            return 0.0
 
 
 def filter_candidates_by_period(candidates: list[PaperCandidate], start_date: date, end_date: date) -> list[PaperCandidate]:
@@ -708,8 +1325,145 @@ def candidate_key(candidate: PaperCandidate) -> str:
 
 
 def candidate_matches_queries(candidate: PaperCandidate) -> bool:
-    haystack = f"{candidate.title} {candidate.abstract}".lower()
-    return any(query.lower() in haystack for query in DEFAULT_PAPER_QUERIES)
+    return candidate_relevance_score(candidate) >= PAPER_RELEVANCE_THRESHOLD
+
+
+def semantic_prefilter_candidates(
+    candidates: list[PaperCandidate],
+    *,
+    api_source: str,
+    retmax: int | None,
+    coverage: dict[str, Any],
+    prefilter_excluded_candidates: list[dict[str, Any]] | None = None,
+) -> list[PaperCandidate]:
+    """Apply a high-recall semantic pass before candidates reach the Phase 4 LLM."""
+    deduped = dedupe_candidates(candidates)
+    evaluated: list[tuple[int, int, bool, PaperCandidate]] = []
+    for candidate in deduped:
+        relevance_score = candidate_relevance_score(candidate)
+        title_score = candidate_title_relevance_score(candidate)
+        sparse_metadata = len(candidate.abstract) < PAPER_SPARSE_ABSTRACT_MIN_CHARS
+        evaluated.append(
+            (relevance_score, title_score, sparse_metadata, candidate)
+        )
+
+    evaluated.sort(
+        key=lambda item: (
+            item[0],
+            item[1],
+            item[3].published_date,
+            item[3].title.lower(),
+        ),
+        reverse=True,
+    )
+    relevant = [
+        candidate
+        for relevance_score, title_score, sparse_metadata, candidate in evaluated
+        if relevance_score >= PAPER_RELEVANCE_THRESHOLD
+        or (
+            sparse_metadata
+            and title_score >= PAPER_SPARSE_METADATA_RELEVANCE_THRESHOLD
+        )
+    ]
+    returned = relevant if retmax is None else relevant[: max(1, retmax)]
+
+    if prefilter_excluded_candidates is not None:
+        returned_keys = {candidate_key(candidate) for candidate in returned}
+        relevant_keys = {candidate_key(candidate) for candidate in relevant}
+        for relevance_score, title_score, sparse_metadata, candidate in evaluated:
+            key = candidate_key(candidate)
+            if key in returned_keys:
+                continue
+            if key in relevant_keys:
+                assert retmax is not None
+                reason_code = "source_limit"
+                reason = (
+                    f"The candidate passed the {api_source} semantic prefilter but "
+                    f"fell below the per-source limit of {retmax}."
+                )
+            else:
+                reason_code = "local_relevance_below_threshold"
+                if sparse_metadata:
+                    reason = (
+                        "The abstract was missing or sparse, and the title alone did "
+                        "not contain enough concrete scientific-experiment execution signals."
+                    )
+                else:
+                    reason = (
+                        "The title and abstract did not contain enough direct scientific-"
+                        "experiment automation, agent-execution, or digital-environment signals."
+                    )
+            prefilter_excluded_candidates.append(
+                {
+                    **asdict(candidate),
+                    "reason_code": reason_code,
+                    "reason": reason,
+                    "relevance_score": relevance_score,
+                    "title_relevance_score": title_score,
+                    "sparse_metadata": sparse_metadata,
+                }
+            )
+
+    coverage.setdefault("semantic_prefilter", {})[api_source] = {
+        "strategy": "high-recall title/abstract semantic scoring before Phase 4 LLM review",
+        "raw_candidate_count": len(candidates),
+        "deduped_candidate_count": len(deduped),
+        "sparse_metadata_candidate_count": sum(item[2] for item in evaluated),
+        "relevance_threshold": PAPER_RELEVANCE_THRESHOLD,
+        "sparse_title_threshold": PAPER_SPARSE_METADATA_RELEVANCE_THRESHOLD,
+        "relevant_candidate_count": len(relevant),
+        "returned_candidate_count": len(returned),
+        "semantic_excluded_count": len(deduped) - len(relevant),
+        "source_limit_excluded_count": max(0, len(relevant) - len(returned)),
+        "candidate_limit_applied": retmax,
+    }
+    return returned
+
+
+def candidate_relevance_score(candidate: PaperCandidate) -> int:
+    """Score direct relevance to automated, agentic, or robotic experimentation.
+
+    This intentionally favors recall. It is only a bounded first pass before the
+    Phase 4 LLM performs the evidence-based inclusion/exclusion decision.
+    """
+    haystack = " ".join(
+        [candidate.title, candidate.abstract, candidate.source, *candidate.raw_categories]
+    ).lower()
+    return relevance_score_for_text(haystack, candidate.raw_categories)
+
+
+def candidate_title_relevance_score(candidate: PaperCandidate) -> int:
+    """Score title-only evidence for records whose abstracts are unavailable."""
+    return relevance_score_for_text(candidate.title.lower(), [])
+
+
+def relevance_score_for_text(text: str, raw_categories: list[str]) -> int:
+    haystack = f" {text} "
+    auxiliary_bonus = min(2, sum(term in haystack for term in POSITIVE_AUXILIARY_TERMS.get()))
+    direct_score = max(
+        (
+            weight
+            for phrase, weight in DIRECT_RELEVANCE_PHRASES.items()
+            if phrase in haystack
+        ),
+        default=0,
+    )
+    if direct_score:
+        return direct_score + min(
+            2,
+            sum(term in haystack for term in EXECUTION_RELEVANCE_TERMS),
+        ) + auxiliary_bonus
+
+    has_domain = any(term in haystack for term in DOMAIN_RELEVANCE_TERMS)
+    automation_hits = sum(term in haystack for term in AUTOMATION_RELEVANCE_TERMS)
+    execution_hits = sum(term in haystack for term in EXECUTION_RELEVANCE_TERMS)
+    if not has_domain or not automation_hits or not execution_hits:
+        return 0
+
+    category_bonus = int(
+        any(category in ARXIV_DISCOVERY_CATEGORIES for category in raw_categories)
+    )
+    return 3 + min(3, automation_hits) + min(3, execution_hits) + category_bonus + auxiliary_bonus
 
 
 def clean_text(value: str) -> str:
@@ -733,6 +1487,25 @@ def parse_date_string(value: str) -> str:
         return datetime.fromisoformat(value.replace("Z", "+00:00")).date().isoformat()
     except ValueError:
         return ""
+
+
+def extract_doi(value: Any) -> str:
+    if isinstance(value, dict):
+        for key in ("doi", "value", "id"):
+            if value.get(key):
+                return extract_doi(value[key])
+        return ""
+    if isinstance(value, list):
+        for item in value:
+            doi = extract_doi(item)
+            if doi:
+                return doi
+        return ""
+    text = clean_text(str(value or ""))
+    match = re.search(r"10\.\d{4,9}/[-._;()/:a-z0-9]+", text, flags=re.IGNORECASE)
+    if not match:
+        return ""
+    return match.group(0).rstrip(".,;)]}")
 
 
 def find_text(node: ET.Element, path: str, ns: dict[str, str]) -> str:
@@ -810,7 +1583,7 @@ def month_name_to_number(value: str) -> int:
 
 
 def crossref_date(item: dict[str, Any]) -> str:
-    for key in ("published-print", "published-online", "published", "created"):
+    for key in ("published-print", "published-online", "published", "posted", "created"):
         parts = item.get(key, {}).get("date-parts") or []
         if parts and parts[0]:
             values = parts[0]
@@ -819,6 +1592,21 @@ def crossref_date(item: dict[str, Any]) -> str:
             except (TypeError, ValueError):
                 continue
     return ""
+
+
+def crossref_posted_date(item: dict[str, Any]) -> str:
+    posted = item.get("posted", {}).get("date-parts") or []
+    if posted and posted[0]:
+        values = posted[0]
+        try:
+            return date(
+                int(values[0]),
+                int(values[1]) if len(values) > 1 else 1,
+                int(values[2]) if len(values) > 2 else 1,
+            ).isoformat()
+        except (TypeError, ValueError):
+            pass
+    return crossref_date(item)
 
 
 def crossref_authors(item: dict[str, Any]) -> list[str]:

@@ -11,14 +11,20 @@ from time import monotonic
 from zoneinfo import ZoneInfo
 
 from .config import DEFAULT_CONFIG_PATH, PROJECT_ROOT, DiscordSettings, load_discord_settings
-from .db import NewsbotStore
+from .db import NewsbotStore, validate_editorial_reason
 from .discord_client import parse_message_interval
 from .feedback import INTERESTED_EMOJI, record_interested_feedback
+from .missed_item import (
+    format_missed_item_result,
+    record_researched_missed_item,
+    research_missed_item_with_codex,
+)
 from .render import (
     render_published_message,
     render_review_message,
     render_weekly_detail_message,
     render_weekly_digest_overview,
+    order_weekly_drafts,
 )
 from .review import build_feedback_custom_id, build_review_custom_id
 from .source_check import SourceCheckResult, check_source_with_codex
@@ -441,11 +447,48 @@ if discord is not None:
                 )
             )
 
-    class BreakingConfirmView(discord.ui.View):
-        def __init__(self, bot: "NewsbotDiscordBot", article_id: str):
+    class EditorialDecisionModal(discord.ui.Modal, title="Editorial reason required"):
+        def __init__(self, bot: "NewsbotDiscordBot", article_id: str, action: str):
             super().__init__(timeout=300)
             self.bot = bot
             self.article_id = article_id
+            self.action = action
+            self.reason_code = discord.ui.TextInput(
+                label="Reason code",
+                placeholder="high_impact / out_of_scope / duplicate / ...",
+                min_length=1,
+                max_length=64,
+            )
+            self.note = discord.ui.TextInput(
+                label="Note (required for other)",
+                style=discord.TextStyle.paragraph,
+                required=False,
+                max_length=500,
+            )
+            self.add_item(self.reason_code)
+            self.add_item(self.note)
+
+        async def on_submit(self, interaction: discord.Interaction) -> None:
+            try:
+                validate_editorial_reason(str(self.reason_code.value).strip(), str(self.note.value).strip())
+            except ValueError as exc:
+                await interaction.response.send_message(str(exc), ephemeral=True)
+                return
+            handler = getattr(self.bot, f"_handle_{self.action}")
+            await handler(
+                interaction,
+                self.article_id,
+                reason_code=str(self.reason_code.value).strip(),
+                reason_note=str(self.note.value).strip(),
+            )
+
+    class BreakingConfirmView(discord.ui.View):
+        def __init__(self, bot: "NewsbotDiscordBot", article_id: str, reason_code: str, reason_note: str):
+            super().__init__(timeout=300)
+            self.bot = bot
+            self.article_id = article_id
+            self.reason_code = reason_code
+            self.reason_note = reason_note
 
         @discord.ui.button(label="Confirm Breaking Publish", style=discord.ButtonStyle.danger)
         async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
@@ -494,6 +537,7 @@ if discord is not None:
                 "breaking",
             )
             latest = await self.bot.db_call(self.bot.store.get_draft, self.article_id)
+            await self.bot._record_editorial(self.article_id, str(interaction.user.id), "accepted", self.reason_code, self.reason_note)
             if latest is not None:
                 await self.bot.db_call(
                     self.bot.store.record_review_action,
@@ -782,6 +826,10 @@ if discord is not None:
                 name="newsbot_collect_reviews",
                 description="Manually collect and submit review candidate news.",
             )(self._cmd_collect_reviews)
+            self.tree.command(
+                name="newsbot_record_missed",
+                description="Investigate and register one missed Lab Automation URL.",
+            )(self._cmd_record_missed)
 
         async def on_ready(self) -> None:
             print(f"Discord bot connected as {self.user}")
@@ -875,6 +923,16 @@ if discord is not None:
 
         async def db_call(self, func, *args, **kwargs):
             return await asyncio.to_thread(func, *args, **kwargs)
+
+        async def _record_editorial(self, article_id: str, user_id: str, decision: str, reason_code: str, note: str) -> None:
+            await self.db_call(
+                self.store.record_editorial_judgment,
+                article_id=article_id,
+                reviewer_user_id=user_id,
+                decision=decision,
+                reason_code=reason_code,
+                note=note,
+            )
 
         async def _require_reviewer(self, interaction: discord.Interaction) -> bool:
             if not self.is_allowed_guild(interaction):
@@ -986,6 +1044,37 @@ if discord is not None:
             await interaction.response.send_message(
                 format_review_collection_confirmation(request),
                 view=ReviewCollectionConfirmView(self, request),
+                ephemeral=True,
+            )
+
+        async def _cmd_record_missed(self, interaction: discord.Interaction, url: str) -> None:
+            if not await self._defer_admin_command(interaction):
+                return
+            try:
+                result = await self.db_call(research_missed_item_with_codex, url)
+                if not result.relevant:
+                    await interaction.followup.send(
+                        format_missed_item_result(result, dry_run=True)
+                        + "\n\nThe URL was not registered because its Lab Automation relevance could not be verified.",
+                        ephemeral=True,
+                    )
+                    return
+                judgment_id = await self.db_call(
+                    record_researched_missed_item,
+                    self.store,
+                    result,
+                    reviewer_user_id=str(interaction.user.id),
+                    topic=default_review_topic(),
+                    cadence=default_review_cadence(),
+                )
+            except Exception as exc:  # noqa: BLE001 - report investigation failures to the requesting admin.
+                await interaction.followup.send(
+                    f"Could not investigate/register the missed URL: {exc}",
+                    ephemeral=True,
+                )
+                return
+            await interaction.followup.send(
+                format_missed_item_result(result, judgment_id=judgment_id),
                 ephemeral=True,
             )
 
@@ -1152,8 +1241,11 @@ if discord is not None:
                     print(f"newsbot: prepare weekly failed for draft {draft.id}: {exc}")
             return prepared, failed, 0
 
-        async def _handle_weekly(self, interaction: discord.Interaction, article_id: str) -> None:
+        async def _handle_weekly(self, interaction: discord.Interaction, article_id: str, *, reason_code: str = "", reason_note: str = "") -> None:
             if not await self._require_reviewer(interaction):
+                return
+            if not reason_code:
+                await interaction.response.send_modal(EditorialDecisionModal(self, article_id, "weekly"))
                 return
             await interaction.response.defer(ephemeral=True, thinking=True)
             draft = await self.db_call(self.store.get_draft, article_id)
@@ -1172,6 +1264,7 @@ if discord is not None:
                 publish_type="weekly",
                 scheduled_at=format_schedule(scheduled_at),
             )
+            await self._record_editorial(article_id, str(interaction.user.id), "accepted", reason_code, reason_note)
             await interaction.followup.send(
                 "Draft approved for weekly publishing.\n"
                 f"Scheduled for: {format_schedule(scheduled_at)}\n\n"
@@ -1181,8 +1274,11 @@ if discord is not None:
             )
             self.schedule_refresh_review_message(article_id)
 
-        async def _handle_cancel_weekly(self, interaction: discord.Interaction, article_id: str) -> None:
+        async def _handle_cancel_weekly(self, interaction: discord.Interaction, article_id: str, *, reason_code: str = "", reason_note: str = "") -> None:
             if not await self._require_reviewer(interaction):
+                return
+            if not reason_code:
+                await interaction.response.send_modal(EditorialDecisionModal(self, article_id, "cancel_weekly"))
                 return
             await interaction.response.defer(ephemeral=True, thinking=True)
             draft = await self.db_call(self.store.get_draft, article_id)
@@ -1206,6 +1302,7 @@ if discord is not None:
                 draft.to_dict(),
                 updated.to_dict(),
             )
+            await self._record_editorial(article_id, str(interaction.user.id), "delivery_cancelled", reason_code, reason_note)
             await interaction.followup.send(
                 "Weekly approval cancelled.\n\n" + render_review_message(updated),
                 view=self.review_view_for_draft(updated),
@@ -1268,8 +1365,11 @@ if discord is not None:
                 suppress_embeds=True,
             )
 
-        async def _handle_ready_go(self, interaction: discord.Interaction, article_id: str) -> None:
+        async def _handle_ready_go(self, interaction: discord.Interaction, article_id: str, *, reason_code: str = "", reason_note: str = "") -> None:
             if not await self._require_reviewer(interaction):
+                return
+            if not reason_code:
+                await interaction.response.send_modal(EditorialDecisionModal(self, article_id, "ready_go"))
                 return
             await interaction.response.defer(ephemeral=True, thinking=True)
             draft = await self.db_call(self.store.get_draft, article_id)
@@ -1289,6 +1389,7 @@ if discord is not None:
                 str(interaction.user.id),
                 publish_type="weekly",
             )
+            await self._record_editorial(article_id, str(interaction.user.id), "accepted", reason_code, reason_note)
             await interaction.followup.send(
                 "Selected for the final digest.\n\n" + render_review_message(updated),
                 view=self.review_view_for_draft(updated),
@@ -1303,8 +1404,11 @@ if discord is not None:
                 )
             await self._maybe_post_digest_ready_message(interaction, updated.topic, updated.cadence, updated.scheduled_at)
 
-        async def _handle_cancel_publish(self, interaction: discord.Interaction, article_id: str) -> None:
+        async def _handle_cancel_publish(self, interaction: discord.Interaction, article_id: str, *, reason_code: str = "", reason_note: str = "") -> None:
             if not await self._require_reviewer(interaction):
+                return
+            if not reason_code:
+                await interaction.response.send_modal(EditorialDecisionModal(self, article_id, "cancel_publish"))
                 return
             await interaction.response.defer(ephemeral=True, thinking=True)
             draft = await self.db_call(self.store.get_draft, article_id)
@@ -1324,6 +1428,7 @@ if discord is not None:
                 draft.to_dict(),
                 updated.to_dict(),
             )
+            await self._record_editorial(article_id, str(interaction.user.id), "delivery_cancelled", reason_code, reason_note)
             await interaction.followup.send(
                 "Cancelled from final publish. The draft returned to pending review.\n\n" + render_review_message(updated),
                 view=self.review_view_for_draft(updated),
@@ -1356,7 +1461,7 @@ if discord is not None:
             await self.send_channel_message(channel, render_weekly_digest_overview(drafts), suppress_embeds=True)
 
             published_count = 0
-            for index, queued_draft in enumerate(drafts, start=1):
+            for index, queued_draft in enumerate(order_weekly_drafts(drafts), start=1):
                 before = await self.db_call(self.store.get_draft, queued_draft.id)
                 message_text = render_weekly_detail_message(queued_draft, index, leading_gap=index == 1)
                 published = await self.send_channel_message(
@@ -1513,18 +1618,24 @@ if discord is not None:
                 ephemeral=True,
             )
 
-        async def _handle_breaking(self, interaction: discord.Interaction, article_id: str) -> None:
+        async def _handle_breaking(self, interaction: discord.Interaction, article_id: str, *, reason_code: str = "", reason_note: str = "") -> None:
             if not await self._require_reviewer(interaction):
+                return
+            if not reason_code:
+                await interaction.response.send_modal(EditorialDecisionModal(self, article_id, "breaking"))
                 return
             await interaction.response.send_message(
                 "Do you want to publish this draft as breaking news?",
-                view=BreakingConfirmView(self, article_id),
+                view=BreakingConfirmView(self, article_id, reason_code, reason_note),
                 ephemeral=True,
             )
             self.schedule_record_breaking_request(article_id, str(interaction.user.id))
 
-        async def _handle_hold(self, interaction: discord.Interaction, article_id: str) -> None:
+        async def _handle_hold(self, interaction: discord.Interaction, article_id: str, *, reason_code: str = "", reason_note: str = "") -> None:
             if not await self._require_reviewer(interaction):
+                return
+            if not reason_code:
+                await interaction.response.send_modal(EditorialDecisionModal(self, article_id, "hold"))
                 return
             await interaction.response.defer(ephemeral=True, thinking=True)
             draft = await self.db_call(self.store.get_draft, article_id)
@@ -1535,6 +1646,7 @@ if discord is not None:
                 await interaction.followup.send("This draft cannot be moved to hold.", ephemeral=True)
                 return
             updated = await self.db_call(self.store.set_draft_status, article_id, "held", str(interaction.user.id))
+            await self._record_editorial(article_id, str(interaction.user.id), "excluded", reason_code, reason_note)
             await interaction.followup.send(
                 "Draft moved to hold. You can choose another action below.\n\n" + render_review_message(updated),
                 view=self.review_view_for_draft(updated),
@@ -1542,8 +1654,11 @@ if discord is not None:
             )
             self.schedule_refresh_review_message(article_id)
 
-        async def _handle_reject(self, interaction: discord.Interaction, article_id: str) -> None:
+        async def _handle_reject(self, interaction: discord.Interaction, article_id: str, *, reason_code: str = "", reason_note: str = "") -> None:
             if not await self._require_reviewer(interaction):
+                return
+            if not reason_code:
+                await interaction.response.send_modal(EditorialDecisionModal(self, article_id, "reject"))
                 return
             await interaction.response.defer(ephemeral=True, thinking=True)
             draft = await self.db_call(self.store.get_draft, article_id)
@@ -1554,6 +1669,7 @@ if discord is not None:
                 await interaction.followup.send("Published drafts cannot be rejected.", ephemeral=True)
                 return
             updated = await self.db_call(self.store.set_draft_status, article_id, "rejected", str(interaction.user.id))
+            await self._record_editorial(article_id, str(interaction.user.id), "excluded", reason_code, reason_note)
             await interaction.followup.send(
                 "Draft rejected. You can choose another action below.\n\n" + render_review_message(updated),
                 view=self.review_view_for_draft(updated),

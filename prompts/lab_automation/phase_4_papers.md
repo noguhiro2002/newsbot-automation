@@ -19,12 +19,24 @@ Audience preference profile:
 
 このPhaseは論文・preprint専用です。ただし「AI」「robot」「automation」「lab」「workflow」という語があるだけで、実験自動化、研究ワークフロー自動化、装置連携、自律実験、closed-loop experimentation、self-driving laboratory、high-throughput experimentation、robotic experimentation、研究データ・実験データの自動処理基盤と直接関係しないものは除外してください。
 
+物理ロボットや実在装置への直接接続は、採用の必須条件ではありません。ChemWorldのようなprogrammable experimental environment、科学実験・研究装置・研究工程のDigital Twin、AI Scientist / Autonomous Science Agentの訓練・評価環境も対象です。次のいずれかが具体的に実装・評価されていれば、実験実行基盤として直接性を認めてください。
+
+* 実験操作、action、observation、state transition、hidden scientific law
+* 試薬・装置・時間などのresource管理や失敗状態
+* 実験trajectoryのreplay、transactional execution、audit
+* 科学Agentの計画・実行・評価、安全性検証、policy切替
+* 実験プロセスや測定系を再現するDigital Twin / virtual laboratory
+
+一方、科学実験の状態・操作・観測・資源・検証可能なworkflowとの具体的接続がない一般的なLLMベンチマーク、チャットAgent評価、コード生成ベンチマークは対象外です。`physical robot connection is absent` だけを除外理由にしてはいけません。
+
 候補はMasterで公式発表候補と比較されます。件数合わせで低関連候補を入れないでください。0件でも構いません。
 
 ## Paper API Candidate Input
 
-Python側が arXiv / PubMed / bioRxiv / medRxiv / Crossref から取得し、期間で事前filterした候補です。
-まずこの候補リストを主入力として評価してください。必要な場合だけWeb searchでcanonical URL、 DOI、出版社版、preprint重複、補足情報を確認してください。
+Python側が arXiv / PubMed / bioRxiv / medRxiv / ChemRxiv / Crossref から取得し、期間で事前filterした候補です。arXivは完全一致フレーズだけに依存せず、投稿日・対象カテゴリから広めに取得した後、タイトルとabstractの実験実行シグナルで高再現率の一次filterを行っています。PubMed、ChemRxiv、Crossrefも、正規化後に同じ高再現率の一次意味判定を通しています。一次filterは明白なノイズを減らすためのもので、最終的な採否はこのPhaseで判断してください。
+このAPIレーンでは候補リストを主入力として評価してください。Web searchはcanonical URL、DOI、出版社版、preprint重複、公開日、補足情報の確認に使い、APIに存在しない新規候補の広域探索は別のBroadレーンへ任せてください。
+
+候補が多い場合、Python側は `paper_api_coverage.llm_batch` に示す複数batchへ分割します。この実行では、渡されたbatch内の全IDだけを漏れなく判定してください。他batchの候補を推測して補完する必要はありません。各batchの結果はPython側で統合されるため、件数合わせで判断を省略したり、abstractを読まずに一括除外したりしないでください。
 
 API候補が0件またはAPI取得に失敗している場合は、`paper_api_coverage` の内容を `search_coverage.limitations` に反映し、補助的なWeb検索で確認してください。
 
@@ -33,7 +45,7 @@ API候補が0件またはAPI取得に失敗している場合は、`paper_api_co
 * 採用する場合: `candidates[].paper_api_candidate_ids` にIDを入れる。同じ研究の複数API候補を統合した場合は、対応する全IDを入れる。
 * 除外する場合: `excluded_api_candidates` にID、理由コード、具体的な除外理由を入れる。
 
-Web検索で新規発見し、API候補に対応しない採用候補は `paper_api_candidate_ids: []` としてください。API候補を未判定のまま残したり、同じIDを採用と除外の両方に入れたりしないでください。
+このAPIレーンの採用候補には、対応する `paper_api_candidate_ids` が1件以上必要です。API候補を未判定のまま残したり、同じIDを採用と除外の両方に入れたりしないでください。
 
 除外理由コードは次のいずれかです。
 
@@ -155,9 +167,9 @@ Web検索で新規発見し、API候補に対応しない採用候補は `paper_
 * 単なるレビュー論文は、分野全体の整理として重要度が高い場合のみ候補化する。個別ニュース性が弱い一般レビューは原則低優先
 * preprintと査読済み版が重複する場合は、査読済み版をcanonical sourceとし、preprintはduplicateとして扱う
 
-## Recommended Search
+## Recommended Verification Search
 
-以下はAPI候補が不足する場合の補助検索です。queries_runには、実際に実行した検索語または確認したAPI queryを順番どおりに記録してください。
+以下はAPI候補の内容・canonical sourceを検証するための検索例です。APIにない候補を追加するための網羅探索には使用しません。queries_runには、実際に実行した確認検索またはAPI queryを順番どおりに記録してください。
 
 ### 1. Flagship journals: Nature / Science / Cell
 

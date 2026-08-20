@@ -70,6 +70,35 @@ Audience preference profile:
 * 一般的な製造自動化、倉庫ロボット、建設ロボット、医療事務自動化など、研究・実験・分析ラボと関係しないもの
 * LIMS/ELN/SDMSについては、単なるUI改善や一般的なSaaSアップデートは除外し、装置連携、データ標準化、AI-ready data、規制対応、workflow orchestration、実験自動化と直接関係する場合のみ候補化
 
+## Mandatory Watchlist Pass
+
+一般語検索に加えて、毎回、以下のwatchlistを名称指定で検索し、可能な場合は公式newsroom / press release / RSS / sitemapを直接確認してください。公開直後で検索indexへ反映されていない発表、見出しが提携・投資・解析技術だけでLab Automationを明記しない発表も、本文の実験workflowまで確認してください。実際に確認した検索語・公式ページを `queries_run` に残してください。
+
+企業・プラットフォーム:
+
+* Bruker / SciY
+* Atinary Technologies / SDLabs
+* Chemspeed Technologies
+* Emerald Cloud Lab / Strateos
+* HighRes Biosolutions / Biosero / Automata / Opentrons
+* Tecan / Hamilton / Beckman Coulter Life Sciences
+* Thermo Fisher Scientific / Agilent / Waters
+* Sartorius / Eppendorf / Molecular Devices / Mettler Toledo
+* UniteLabs / Synthace / Benchling / Dotmatics
+
+研究機関・研究基盤:
+
+* Argonne National Laboratory / Advanced Photon Source (APS)
+* Lawrence Berkeley National Laboratory
+* NIST
+* Oak Ridge National Laboratory
+* Carnegie Mellon University Cloud Lab
+* University of Toronto Acceleration Consortium
+* University of Liverpool Materials Innovation Factory
+* Global Biofoundry Alliance / London Biofoundry / UK Biofoundry
+
+watchlist掲載だけを採用理由にしてはいけません。期間内の新規発表と、実験自動化・装置連携・自律判断・測定から次条件決定までのloop・AI-ready experimental dataの直接性を確認してください。
+
 ## Source Priority
 
 検索は、以下の順番で行ってください。queries_runには、実際に実行した検索語を順番どおりに記録してください。
@@ -109,13 +138,17 @@ Audience preference profile:
    * Ginkgo Bioworks / Biofoundry
    * UK Biofoundry / London Biofoundry
    * Global Biofoundry Alliance
-   * Argonne National Laboratory / autonomous discovery
+   * Argonne National Laboratory / Advanced Photon Source / autonomous discovery / real-time experimental analysis
    * Berkeley Lab / self-driving lab
+   * Oak Ridge National Laboratory / autonomous experimentation / neutron and materials characterization
    * NIST / autonomous experimentation / materials acceleration
    * MIT / Stanford / Caltech / Harvard / University of Liverpool など、公式発表で実験自動化・自律実験基盤が明確なもの
 
 4. 企業のLab Automation製品・提携・提供開始
 
+   * Bruker / SciY
+   * Atinary Technologies / SDLabs
+   * Chemspeed Technologies
    * HighRes Biosolutions
    * Opentrons
    * Biosero / Green Button Go
@@ -165,6 +198,17 @@ Audience preference profile:
 ## Recommended Search
 
 以下の順番で検索してください。`{{PERIOD}}` が明示されている場合は、その期間から年・月を読み取り、対応する期間表現を検索語へ加えてください。実行時の対象期間と異なる年を固定的に使わないでください。
+
+### 0. Mandatory watchlist
+
+```text
+(Bruker OR Atinary OR Chemspeed OR SciY) (partnership OR investment OR integration OR "self-driving lab" OR "closed-loop") "{{PERIOD}}"
+site:bruker.com (Atinary OR Chemspeed OR SciY OR "lab automation") "{{PERIOD}}"
+site:atinary.com (Bruker OR Chemspeed OR SDLabs OR partnership) "{{PERIOD}}"
+("Emerald Cloud Lab" OR Strateos OR HighRes OR Biosero OR Automata OR Opentrons) (launch OR partnership OR integration) "{{PERIOD}}"
+site:anl.gov OR site:aps.anl.gov ("real-time analysis" OR "on-the-fly analysis" OR "experimental steering" OR "autonomous experiment") "{{PERIOD}}"
+site:lbl.gov OR site:nist.gov OR site:ornl.gov ("autonomous experiment" OR "self-driving lab" OR "AI for Science" OR "adaptive experiment") "{{PERIOD}}"
+```
 
 ### 1. Standards / interoperability / data standards
 
@@ -611,6 +655,14 @@ site:pharmtech.com "laboratory automation" "PAT" -site:arxiv.org
 * 標準化団体や規制機関のページでは、発表日、更新日、リリース日が明確なものを優先してください。
 * 企業の製品ページは、指定期間内のプレスリリース、ニュース、展示会発表、製品ローンチと紐づく場合に限って候補化してください。
 
+## Feed lane input and lane isolation
+
+この呼び出しはstructuredレーン専用です。広域検索は別の独立Codexセッションが行うため、ここでは実行しないでください。
+
+開始時にPythonが取得したfeed/sitemap候補を以下に示します。本文・日付・公式性・直接性を検証し、採用した候補は `discovery_mode: "feed"`, `discovery_modes: ["feed"]` としてください。通常検索でも同じイベントを発見した場合は両方を保存してください。
+
+{{FEED_CANDIDATES_JSON}}
+
 ## Output Contract
 
 最終Newsbot payloadは作らないでください。返答は単一のJSON objectだけにしてください。Markdown、コードフェンス、説明文は不要です。
@@ -631,13 +683,23 @@ site:pharmtech.com "laboratory automation" "PAT" -site:arxiv.org
       "evidence": "...",
       "confidence": 0.0,
       "canonical_source_checked": true,
+      "discovery_mode": "structured",
+      "discovery_modes": ["structured"],
       "duplicate_key": "normalized-event-name"
     }
   ],
   "search_coverage": {
     "queries_run": ["..."],
+    "structured_queries_run": ["..."],
+    "broad_queries_run": [],
+    "structured_candidate_count": 0,
+    "broad_candidate_count": 0,
+    "merged_candidate_count": 0,
     "notable_zero_result_queries": ["..."],
     "limitations": "..."
   }
 }
 ```
+
+`discovery_mode` は主な発見経路を `"structured"`、feed起点なら `"feed"` で記録してください。`discovery_modes` は重複排除前に確認できた全経路を配列で記録してください。
+`structured_candidate_count` と `broad_candidate_count` はレーン間統合前の候補数、`merged_candidate_count` は統合後の最終候補数です。同一イベントを両レーンで見つけた場合は両方のレーン件数に数え、統合後は1件として数えてください。

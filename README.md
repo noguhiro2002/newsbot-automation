@@ -40,17 +40,19 @@ sequenceDiagram
         Codex-->>Newsbot: Phase candidate JSON
     end
 
-    Newsbot->>APIs: Fetch paper candidates in period
-    Note over APIs: arXiv / PubMed / bioRxiv<br/>medRxiv / Crossref
-    APIs-->>Newsbot: Paper list / per-API results
-    Newsbot->>Newsbot: Period filter, normalize, remove duplicates
-    Newsbot->>Codex: Phase 4 prompt + API candidates + profile
-    alt API candidates available
-        Codex->>Codex: Relevance selection and canonical URL checks
-    else No candidates / API failure
-        Codex->>Codex: Fallback Web search and URL checks
+    par Phase 4 API lane
+        Newsbot->>APIs: Fetch paper candidates in period
+        Note over APIs: arXiv / PubMed / bioRxiv<br/>medRxiv / ChemRxiv / Crossref
+        APIs-->>Newsbot: Paper list / per-API results
+        Newsbot->>Newsbot: Period filter, normalize, remove duplicates
+        Newsbot->>Codex: API candidates + verification prompt
+        Codex-->>Newsbot: Evaluated API candidate JSON
+    and Phase 4 independent broad lane
+        Newsbot->>Codex: Period + scientific-workflow scope only
+        Codex->>Codex: Independent broad paper Web search
+        Codex-->>Newsbot: Broad paper candidate JSON
     end
-    Codex-->>Newsbot: Phase 4 candidate JSON
+    Newsbot->>Newsbot: Merge Phase 4 DOI / URL / title and provenance
 
     Newsbot->>Codex: All phases + Master prompt + profile
     Codex->>Codex: Merge, deduplicate, and assess importance
@@ -80,9 +82,11 @@ sequenceDiagram
 
 Newsbot Automation itself is a Python application. It orchestrates the workflow and implements paper API retrieval and preprocessing, validation and ranking, the Discord App, and SQLite integration. The Python application invokes Codex CLI for candidate-collection Web searches and for the Phase 1–4 and Master LLM selection steps.
 
-For paper discovery, Python retrieves API candidates, filters them to the requested period, and removes duplicates. Duplicate removal consolidates the same paper retrieved from multiple APIs, a preprint, or a publisher version by using identifiers such as DOI and URL. The Codex CLI Phase 4 LLM uses that list as its primary input. It can use Web search as a fallback when APIs fail or return no candidates. The Codex CLI Master LLM merges all phase outputs, after which Python reranks the result with the same feedback profile.
+For paper discovery, Python retrieves API candidates, filters them to the requested period, and removes duplicates. arXiv, PubMed, bioRxiv, medRxiv, ChemRxiv, and Crossref candidates receive a shared high-recall semantic prefilter before Phase 4 LLM review; rejected prefilter candidates and source-level counts are retained in the Phase 4 audit artifacts. ChemRxiv uses Crossref `posted-content` as its sole machine-readable metadata route, filters locally for both current `10.26434/chemrxiv.` and legacy `10.26434/chemrxiv-` DOIs, and merges `/vN`, `-vN`, and `.vN` versions at the work level. Crossref uses the documented public or polite pool limits and honors `Retry-After`. Phase 4 runs its batched API-review lane and an API-blind broad Web-search lane concurrently, then merges DOI, canonical URL, normalized title, and `api`/`broad` provenance. Phase 4 also covers programmable experimental environments, scientific digital twins, and AI Scientist evaluation environments when they model concrete scientific experiment actions, state, observations, resources, replay, or audit. Phase 1 through Phase 3 run structured and broad discovery as two parallel, isolated Codex sessions. RSS/Atom/sitemap candidates enter only the structured session, then Python merges canonical URLs, duplicate keys, normalized titles, and discovery provenance. Phase 1–5 have no fixed candidate-output ceiling; only the Master/reviewer stage applies the configured final limit. Each failed lane is retried once; one successful lane is sufficient. Retry prompts, logs, events, and usage are retained per attempt, and malformed broad-query counts are recovered from actual Codex Web-search events when possible. Phase 5 remains independent of same-run Phase 1–4 output. The Master merges all five phases.
 
-`Interested` events from previously published articles are aggregated by category, tag, and source for the same topic and cadence. The resulting profile is passed to both LLM selection and the final Python ranking on the next run. Feedback is currently a positive-only ranking boost—not probabilistic sampling or a negative-feedback penalty.
+`Interested` remains a separate reader signal. Editorial accept/exclude/cancel/missed decisions require a reason code and are aggregated over `NEWSBOT_FEEDBACK_LOOKBACK_WEEKS` (default 12). Missed organizations/domains become a temporary dynamic watchlist; negative feedback informs LLM judgment but never becomes an automatic hard exclusion. Every run stores candidate provenance and a hashed feedback audit window. Event dates are stored separately from canonical publication dates, and important events render under an `Events` section in the weekly digest.
+
+Administrators listed in `DISCORD_REVIEWER_USER_IDS` can register a search miss with only `/newsbot_record_missed url:<URL>`. Newsbot asks Codex to verify the page and related primary evidence, derive canonical metadata and its phase, and writes a `search_miss` judgment only when a concrete Lab Automation connection is verified. The response is ephemeral. Configure this investigation separately with `NEWSBOT_MISSED_ITEM_MODEL`, `NEWSBOT_MISSED_ITEM_REASONING_EFFORT`, and `NEWSBOT_MISSED_ITEM_TIMEOUT_SECONDS`.
 
 </details>
 
@@ -92,7 +96,7 @@ The runtime supports multiple topics, but the detailed multi-phase workflow curr
 
 The templates are selected as follows:
 
-- `prompts/lab_automation/phase_1_*.md` through `phase_4_*.md` plus `master_builder.md`: the normal four-phase and Master workflow for `lab_automation`.
+- `prompts/lab_automation/phase_1_*.md` through `phase_5_*.md` plus `master_builder.md`: the normal five-phase and Master workflow for `lab_automation`.
 - `prompts/lab_automation.md`: the single-prompt fallback used with `--topic lab_automation --single-agent`.
 - `prompts/stock_news.md`: an example of the normal top-level single-prompt workflow.
 - A topic without `prompts/<topic>.md`: the generic prompt built into Python.
@@ -153,6 +157,8 @@ DISCORD_REVIEW_CHANNEL_ID=
 DISCORD_PUBLISH_CHANNEL_ID=
 DISCORD_REVIEWER_USER_IDS=
 DISCORD_ALLOWED_GUILD_ID=
+NEWSBOT_MISSED_ITEM_MODEL=gpt-5.6-luna
+NEWSBOT_MISSED_ITEM_REASONING_EFFORT=high
 NEWSBOT_NCBI_TOOL=newsbot_automation
 NEWSBOT_NCBI_EMAIL=
 NEWSBOT_CROSSREF_MAILTO=

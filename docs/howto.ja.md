@@ -68,6 +68,7 @@ NEWSBOT_LAB_AUTOMATION_PHASE_1_REASONING_EFFORT=
 NEWSBOT_LAB_AUTOMATION_MASTER_MODEL=
 NEWSBOT_LAB_AUTOMATION_MASTER_REASONING_EFFORT=
 NEWSBOT_PAPER_API_RETMAX=
+NEWSBOT_PHASE_4_LLM_BATCH_SIZE=50
 NEWSBOT_NCBI_TOOL=newsbot_automation
 NEWSBOT_NCBI_EMAIL=your-email@example.com
 NCBI_API_KEY=
@@ -85,7 +86,8 @@ NEWSBOT_LOOKBACK_DAYS=
 - `NEWSBOT_CODEX_REASONING_EFFORT` は `low`, `medium`, `high`, `xhigh`, `max` を指定できます。空の場合は Codex CLI 側のデフォルトです。
 - `NEWSBOT_LAB_AUTOMATION_PHASE_<N>_MODEL` と `NEWSBOT_LAB_AUTOMATION_PHASE_<N>_REASONING_EFFORT` で、lab_automation multi-agent のPhase別デフォルトを指定できます。
 - `NEWSBOT_LAB_AUTOMATION_MASTER_MODEL` と `NEWSBOT_LAB_AUTOMATION_MASTER_REASONING_EFFORT` で、Master統合のデフォルトを指定できます。
-- `NEWSBOT_PAPER_API_RETMAX` はPhase 4の論文API取得件数です。空の場合は50です。
+- `NEWSBOT_PAPER_API_RETMAX` は旧名称を維持したPubMed/Crossrefの走査budgetです。空の場合は50ですが、意味判定通過後の候補を切り捨てる上限ではありません。
+- `NEWSBOT_PHASE_4_LLM_BATCH_SIZE` は1回のPhase 4 LLM呼び出しで判定するAPI候補数です。空の場合は50で、候補が多い場合は全候補を複数batchに分けて判定・統合します。
 - `NEWSBOT_NCBI_TOOL` は空白を含まない、このアプリを識別する名前です。通常は `newsbot_automation` のままで構いません。
 - `NEWSBOT_NCBI_EMAIL` は運用者・開発者本人の有効な連絡先メールアドレスです。第三者利用者のメールアドレスは指定しません。
 - PubMedを継続利用する場合は、使用するtool名、email、開発者または組織名を `eutilities@ncbi.nlm.nih.gov` に連絡して登録してください。
@@ -142,10 +144,22 @@ Codexを呼ばずにpromptだけ確認する場合:
 python scripts/generate_payload_openai.py --topic lab_automation --skip-codex
 ```
 
-デフォルトのmulti-phase workflowでは、実際にCodexへ渡すpromptがPhase別の`.phase_1.prompt.txt`〜`.phase_4.prompt.txt`と`.master.prompt.txt`として保存されます。`prompts/lab_automation.md`を使う`--single-agent`の場合だけ、top-levelの`.prompt.txt`が保存されます。いずれも、テンプレートへ期間・保存先・設定パス・Interested feedback profileを差し込んだ後の実promptです。
+Phase 1〜5とMasterを本番DB・成功Run時刻・Discordから完全に分離して実行する場合:
+
+```bash
+python scripts/generate_payload_openai.py \
+  --topic lab_automation \
+  --cadence weekly \
+  --lookback-days 7 \
+  --codex-timeout 5400 \
+  --isolated-dry-run
+```
+
+デフォルトのmulti-phase workflowでは、Phase 1〜3は`.phase_N.structured.prompt.txt`と`.phase_N.broad.prompt.txt`に分かれ、別Codexセッションで並列実行されます。Phase 4も`.phase_4.api*.prompt.txt`と`.phase_4.broad.prompt.txt`に分かれ、API取得・batch判定とAPI非参照の独立論文検索を並列実行します。各試行は`.attempt_1` / `.attempt_2`付きのprompt・log・events・usageとして保存され、成功試行は従来の`.codex.log`等にも複製されます。Broad出力のquery一覧が誤って数値になった場合は、実際のCodex Web検索eventから文字列配列を復元して監査へ残します。Phase 5は`.phase_5.prompt.txt`、統合は`.master.prompt.txt`です。feed取得監査は`.feeds.audit.json`、レーン別時間・候補・Phase 5評価・feedback windowは`.run.audit.json`に保存されます。Phase 5は他Phaseの結果を受け取らずにPhase横断検索を行います。
 同じ日に複数回実行しても、実行時刻入りの別ファイルとして残ります。通常実行ではPhase別に`.json`、`.codex.log`、`.codex.events.jsonl`、`.codex.usage.json`も保存されます。
-Phase 4では、Codex実行前に論文API候補を取得し、`.phase_4.paper_api.json`にも保存します。従来のprompt-only探索に戻す場合は`--disable-paper-api`を指定します。
-論文API clientはrate limitとretry/backoffを適用します。coverageやpromptへ保存するquery metadataはredactされるため、`NCBI_API_KEY`は成果物やCodexへ渡りません。PubMed利用前に[Legal Notices](legal-notices.md)を確認してください。
+Phase 4では、arXiv / PubMed / bioRxiv / medRxiv / ChemRxiv / Crossref のAPI候補を共通の高再現率な一次意味判定へ通し、通過候補を件数で切り捨てず全件batch判定します。同時に、API候補・API query・watchlist・Phase 1〜3出力を渡さないBroadレーンが論文・preprintを白紙から検索します。両レーンはDOI、canonical URL、正規化titleで統合し、`api` / `broad` / 両方の来歴を保存します。API監査は`.phase_4.paper_api.json`、統合結果は`.phase_4.json`です。bioRxiv / medRxivは30件単位の全ページを取得後に判定します。ChemRxivはCrossref `posted-content`を唯一の機械取得経路とし、現行の`10.26434/chemrxiv.`と旧形式の`10.26434/chemrxiv-`をローカル判定したうえで、`/v2`、`-v2`、`.v2`を除いた論文単位で統合します。`--disable-paper-api`指定時もBroadレーンは実行します。
+Phase 1〜5には固定の候補出力上限を設けません。検証済みの適格候補はすべてMasterへ渡し、既定30件の制限は最終Master・Reviewer選定段階だけで適用します。APIページ走査の安全上限とPhase 4 LLM batch sizeは運用制御として維持しますが、意味判定通過候補を捨てる制限ではありません。
+論文API clientはrate limitとretry/backoffを適用します。ChemRxiv取得を含むCrossrefアクセスはPublic 5 request/秒・同時1接続または`mailto`付きPolite 10 request/秒（実装上は同時1接続）以下に制限し、429と`Retry-After`へ従います。coverageやpromptへ保存するquery metadataはredactされるため、`NCBI_API_KEY`は成果物やCodexへ渡りません。PubMed利用前に[Legal Notices](legal-notices.md)を確認してください。
 
 固定日数分だけ検索する場合:
 
@@ -173,6 +187,17 @@ Reviewerは各draftに対して以下を選べます。
 - `Reject`: 却下する。
 
 Reviewer操作は `DISCORD_REVIEWER_USER_IDS` に含まれるユーザーだけが実行できます。
+
+見逃し記事は、Reviewer権限のある管理者が `/newsbot_record_missed url:<URL>` を実行すると、URLだけから登録できます。BotはCodexでページと関連する一次情報を調査し、正規URL、タイトル、組織、Phase、公開日、関連性の根拠を取得します。Lab Automationとの具体的な関連を確認できた場合だけ、`search_miss` として編集判断DBへ保存します。調査結果は実行者だけにephemeral表示され、通常チャンネルには投稿されません。調査モデル、reasoning、timeoutは `NEWSBOT_MISSED_ITEM_MODEL`、`NEWSBOT_MISSED_ITEM_REASONING_EFFORT`、`NEWSBOT_MISSED_ITEM_TIMEOUT_SECONDS` で設定できます。
+
+DiscordやDBへ書き込まず、同じURL調査だけを確認する場合:
+
+```bash
+python -m newsbot.cli research-missed \
+  --url 'https://example.com/news-item' \
+  --reviewer 'dry-run' \
+  --dry-run
+```
 
 ## 8. Final weekly reviewを行う
 
@@ -246,6 +271,7 @@ Discordで使えます。
 - `/newsbot_refresh_reviews`
 - `/newsbot_prepare_weekly`
 - `/newsbot_collect_reviews`
+- `/newsbot_record_missed url:<URL>`
 
 ## 12. 動作確認
 

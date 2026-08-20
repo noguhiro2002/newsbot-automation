@@ -5,12 +5,18 @@ import json
 import os
 import sys
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from .config import DEFAULT_CONFIG_PATH, PROJECT_ROOT, load_config, load_discord_settings, resolve_project_path
 from .db import DEFAULT_DB_PATH, NewsbotStore
 from .discord_bot import run_bot
 from .discord_client import DiscordApiError, DiscordBotClient
 from .feedback import feedback_components
+from .missed_item import (
+    format_missed_item_result,
+    record_researched_missed_item,
+    research_missed_item_with_codex,
+)
 from .models import NewsPayload
 from .notifiers import NotificationError, send_discord, send_x_post
 from .ranking import REVIEW_MAX_ITEMS, rank_news_items
@@ -20,6 +26,7 @@ from .render import (
     render_review_message,
     render_weekly_detail_message,
     render_weekly_digest_overview,
+    order_weekly_drafts,
 )
 from .review import final_digest_components, final_weekly_components, review_components
 
@@ -133,6 +140,41 @@ def cmd_submit_review(args: argparse.Namespace) -> int:
     return 0 if failed == 0 else 1
 
 
+def cmd_record_missed(args: argparse.Namespace) -> int:
+    store = NewsbotStore(args.db)
+    store.init()
+    domain = args.domain.strip() or urlsplit(args.url).netloc.lower()
+    judgment_id = store.record_editorial_judgment(
+        decision="missed", reason_code=args.reason_code, note=args.note,
+        reviewer_user_id=args.reviewer, topic=args.topic, cadence=args.cadence,
+        canonical_url=args.url, title=args.title, phase=args.phase,
+        organization=args.organization, domain=domain,
+    )
+    print(f"Recorded missed item: {judgment_id}")
+    return 0
+
+
+def cmd_research_missed(args: argparse.Namespace) -> int:
+    result = research_missed_item_with_codex(args.url)
+    if args.dry_run:
+        print(format_missed_item_result(result, dry_run=True))
+        print("")
+        print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
+        return 0
+
+    store = NewsbotStore(args.db)
+    store.init()
+    judgment_id = record_researched_missed_item(
+        store,
+        result,
+        reviewer_user_id=args.reviewer,
+        topic=args.topic,
+        cadence=args.cadence,
+    )
+    print(format_missed_item_result(result, judgment_id=judgment_id))
+    return 0
+
+
 def cmd_publish_weekly(args: argparse.Namespace) -> int:
     config = load_config(args.config)
     if not config.has_topic_cadence(args.topic, args.cadence):
@@ -160,7 +202,7 @@ def cmd_publish_weekly(args: argparse.Namespace) -> int:
         else:
             client.create_message(settings.publish_channel_id, overview_text)
 
-    for index, draft in enumerate(drafts, start=1):
+    for index, draft in enumerate(order_weekly_drafts(drafts), start=1):
         message_text = render_weekly_detail_message(draft, index, leading_gap=index == 1)
         if args.dry_run:
             print(message_text)
@@ -435,6 +477,34 @@ def build_parser() -> argparse.ArgumentParser:
     submit_review.add_argument("--input", required=True)
     submit_review.add_argument("--dry-run", action="store_true")
     submit_review.set_defaults(func=cmd_submit_review)
+
+    missed = subparsers.add_parser("record-missed", help="Record an editor-supplied missed article for future search feedback")
+    missed.add_argument("--title", required=True)
+    missed.add_argument("--url", required=True)
+    missed.add_argument("--topic", default="lab_automation")
+    missed.add_argument("--cadence", default="weekly")
+    missed.add_argument("--phase", required=True, choices=["phase_1", "phase_2", "phase_3", "phase_4", "phase_5"])
+    missed.add_argument("--reason-code", required=True)
+    missed.add_argument("--note", default="")
+    missed.add_argument("--organization", default="")
+    missed.add_argument("--domain", default="")
+    missed.add_argument("--reviewer", required=True)
+    missed.set_defaults(func=cmd_record_missed)
+
+    research_missed = subparsers.add_parser(
+        "research-missed",
+        help="Investigate one URL with Codex and optionally register it as a missed article",
+    )
+    research_missed.add_argument("--url", required=True)
+    research_missed.add_argument("--topic", default="lab_automation")
+    research_missed.add_argument("--cadence", default="weekly")
+    research_missed.add_argument("--reviewer", required=True)
+    research_missed.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Run the URL investigation but do not write an editorial judgment to SQLite",
+    )
+    research_missed.set_defaults(func=cmd_research_missed)
 
     publish_weekly = subparsers.add_parser("publish-weekly", help="Publish approved weekly drafts to Discord")
     publish_weekly.add_argument("--topic", default="lab_automation")

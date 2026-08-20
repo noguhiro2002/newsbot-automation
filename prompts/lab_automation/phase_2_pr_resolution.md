@@ -68,6 +68,48 @@ PR TIMES、PR Newswire、Business Wire、GlobeNewswireなどを広告として�
 * GMP / GxP lab automation
 * 21 CFR Part 11 と実験データ・装置連携に関係する発表
 
+## Mandatory Watchlist Pass
+
+一般語検索だけでは、公開直後で検索エンジンへの反映が遅いニュースや、見出しに `laboratory automation` を含まない提携発表を取りこぼします。毎回、以下のwatchlistについて、企業・機関名を明示した検索と、公式newsroom / press release / RSS / sitemapの確認を行ってください。実際に確認した名称・URL・検索語を `queries_run` に記録してください。
+
+企業・プラットフォーム:
+
+* Bruker / SciY
+* Atinary Technologies / SDLabs
+* Chemspeed Technologies
+* Emerald Cloud Lab
+* Strateos
+* HighRes Biosolutions
+* Opentrons
+* Biosero / Green Button Go
+* Automata / LINQ
+* Tecan
+* Hamilton
+* Beckman Coulter Life Sciences
+* Thermo Fisher Scientific
+* Agilent
+* Waters
+* Revvity / PerkinElmer
+* Sartorius
+* Eppendorf
+* Molecular Devices
+* Mettler Toledo
+* UniteLabs
+* Synthace
+
+研究機関・研究基盤:
+
+* Argonne National Laboratory / Advanced Photon Source (APS)
+* Lawrence Berkeley National Laboratory
+* NIST
+* Oak Ridge National Laboratory
+* Carnegie Mellon University Cloud Lab
+* University of Toronto Acceleration Consortium
+* University of Liverpool Materials Innovation Factory
+* Global Biofoundry Alliance / London Biofoundry / UK Biofoundry
+
+watchlist掲載だけを理由に採用してはいけません。対象期間内の新しい発表であり、Lab Automation、自律実験、装置連携、実験データ、リアルタイム解析、または実験workflowとの直接性が確認できたものだけを候補化してください。
+
 ## Source Priority
 
 検索は、以下の順番で行ってください。`queries_run` には実際に実行した検索語を順番どおりに記録してください。
@@ -127,6 +169,15 @@ PR TIMES、PR Newswire、Business Wire、GlobeNewswireなどを広告として�
 ## Recommended Search
 
 以下の順番で検索してください。`{{PERIOD}}` が明示されている場合は、その期間から年・月を読み取り、対応する日本語・英語の期間表現を検索語へ加えてください。実行時の対象期間と異なる年を固定的に使わないでください。
+
+### 0. Mandatory watchlist
+
+```text
+(Bruker OR Atinary OR Chemspeed OR SciY) ("self-driving lab" OR "closed-loop" OR "agentic AI" OR "AI-ready data") "{{PERIOD}}"
+("Emerald Cloud Lab" OR Strateos OR Opentrons OR Biosero OR Automata) (launch OR partnership OR integration OR automation) "{{PERIOD}}"
+(Tecan OR Hamilton OR "Thermo Fisher" OR Agilent OR Waters OR Sartorius) ("lab automation" OR "instrument integration" OR orchestration) "{{PERIOD}}"
+(Argonne OR "Advanced Photon Source" OR NIST OR "Berkeley Lab") ("autonomous experiment" OR "real-time analysis" OR "experimental steering" OR "AI for Science") "{{PERIOD}}"
+```
 
 ### 1. Domestic PR distribution: PR TIMES
 
@@ -543,6 +594,14 @@ site:<organization-domain> 研究データ基盤
 * 公式ページが見つからずPR配信ページを採用する場合は、`canonical_source_checked` を true にするには、公式URL解決検索を実行し、見つからなかったことを evidence または limitations に明記してください。
 * 発表主体が不明、またはPR配信主体と実施主体が曖昧な場合は候補にしないでください。
 
+## Feed lane input and lane isolation
+
+この呼び出しはstructuredレーン専用です。広域検索は別の独立Codexセッションが行うため、ここでは実行しないでください。
+
+開始時にPythonが取得したfeed候補を以下に示します。本文・日付・公式URL・直接性を検証し、採用したfeed候補は `discovery_mode: "feed"`, `discovery_modes: ["feed"]` としてください。構造化検索でも同じイベントを発見した場合は両方を保存してください。
+
+{{FEED_CANDIDATES_JSON}}
+
 ## Output Contract
 
 最終Newsbot payloadは作らないでください。返答は単一のJSON objectだけにしてください。Markdown、コードフェンス、説明文は不要です。
@@ -563,11 +622,18 @@ site:<organization-domain> 研究データ基盤
       "evidence": "PR発見元、公式URL解決結果、canonical source採用理由を簡潔に書く",
       "confidence": 0.0,
       "canonical_source_checked": true,
+      "discovery_mode": "broad",
+      "discovery_modes": ["broad"],
       "duplicate_key": "normalized-event-name"
     }
   ],
   "search_coverage": {
     "queries_run": ["..."],
+    "structured_queries_run": ["..."],
+    "broad_queries_run": [],
+    "structured_candidate_count": 0,
+    "broad_candidate_count": 0,
+    "merged_candidate_count": 0,
     "notable_zero_result_queries": ["..."],
     "limitations": "..."
   }
@@ -581,3 +647,5 @@ site:<organization-domain> 研究データ基盤
 * `source` は、canonical sourceの発行主体名にしてください。PR配信ページをcanonical sourceにした場合でも、可能な限り発表主体名を入れ、配信サービス名だけにしないでください。
 * `url` は、公式URLに解決できた場合は公式URL、解決できなかった場合のみPR配信URLにしてください。
 * `evidence` には、発見元がPR配信ページだったこと、公式URLを確認したか、なぜcanonical sourceとして採用したかを簡潔に書いてください。
+* `discovery_mode` は主な発見経路を `"structured"`、feed起点なら `"feed"` で記録してください。`discovery_modes` は重複排除前に確認できた全経路を配列で記録してください。
+* `structured_candidate_count` と `broad_candidate_count` はレーン間統合前の候補数、`merged_candidate_count` は統合後の最終候補数です。同一イベントを両レーンで見つけた場合は両方のレーン件数に数え、統合後は1件として数えてください。

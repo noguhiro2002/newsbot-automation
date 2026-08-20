@@ -43,6 +43,8 @@ Phase候補以外を追加してもよいのは、明らかな公式URL解決や
 * 国内大型研究基盤、スマートクラウドラボ、研究設備自動化、AI for Science基盤、共同利用施設、研究データ基盤は、technical noveltyが中程度でも高く評価する。
 * Audience preference profileはランキング信号として使うが、高インパクト候補を除外する理由にはしない。
 * 低関連候補を件数合わせで入れない。
+* Phase 5は他Phaseの結果を見ずに行った独立広域探索である。Phase 5由来であること自体を減点せず、根拠・公式性・期間・直接性を同じ基準で評価する。
+* `discovery_mode` / `discovery_modes` は発見経路の監査情報として使い、構造化検索と広域検索の両方で見つかった候補は強いcoverage signalとして扱う。ただし発見経路だけで重要度を決めない。
 
 ## Required Output
 
