@@ -11,7 +11,7 @@ from time import monotonic
 from zoneinfo import ZoneInfo
 
 from .config import DEFAULT_CONFIG_PATH, PROJECT_ROOT, DiscordSettings, load_discord_settings
-from .db import NewsbotStore, validate_editorial_reason
+from .db import EDITORIAL_REASON_CODES, NewsbotStore, validate_editorial_reason
 from .discord_client import parse_message_interval
 from .feedback import INTERESTED_EMOJI, record_interested_feedback
 from .missed_item import (
@@ -453,24 +453,27 @@ if discord is not None:
             self.bot = bot
             self.article_id = article_id
             self.action = action
-            self.reason_code = discord.ui.TextInput(
-                label="Reason code",
-                placeholder="high_impact / out_of_scope / duplicate / ...",
-                min_length=1,
-                max_length=64,
+            self.reason_code = discord.ui.Select(
+                placeholder="Select a reason code",
+                min_values=1,
+                max_values=1,
+                options=[
+                    discord.SelectOption(label=reason_code, value=reason_code)
+                    for reason_code in sorted(EDITORIAL_REASON_CODES)
+                ],
             )
             self.note = discord.ui.TextInput(
-                label="Note (required for other)",
                 style=discord.TextStyle.paragraph,
                 required=False,
                 max_length=500,
             )
-            self.add_item(self.reason_code)
-            self.add_item(self.note)
+            self.add_item(discord.ui.Label(text="Reason code", component=self.reason_code))
+            self.add_item(discord.ui.Label(text="Note (required for other)", component=self.note))
 
         async def on_submit(self, interaction: discord.Interaction) -> None:
+            reason_code = self.reason_code.values[0].strip()
             try:
-                validate_editorial_reason(str(self.reason_code.value).strip(), str(self.note.value).strip())
+                validate_editorial_reason(reason_code, str(self.note.value).strip())
             except ValueError as exc:
                 await interaction.response.send_message(str(exc), ephemeral=True)
                 return
@@ -478,7 +481,7 @@ if discord is not None:
             await handler(
                 interaction,
                 self.article_id,
-                reason_code=str(self.reason_code.value).strip(),
+                reason_code=reason_code,
                 reason_note=str(self.note.value).strip(),
             )
 
