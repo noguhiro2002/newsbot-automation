@@ -319,6 +319,35 @@ class CliWorkflowTests(unittest.TestCase):
         self.assertEqual(labels, ["Reorder", "Publish Digest"])
         self.assertEqual(self._rows("article_drafts")[0]["status"], "final_ready")
 
+    def test_single_stage_prepare_posts_one_preview_per_batch_without_second_review(self):
+        store = NewsbotStore(self.db_path)
+        store.init()
+        drafts = []
+        for index, status in enumerate(("approved_weekly", "ready_weekly", "pending")):
+            draft, _ = store.create_or_update_draft_from_item(
+                "lab_automation", "weekly",
+                NewsItem(title=f"Candidate {index}", url=f"https://example.com/single-{index}", summary="Body", raw={}),
+            )
+            store.set_draft_status(draft.id, status, "reviewer-1", scheduled_at=f"batch-{index}")
+            drafts.append(draft)
+        env = {"NEWSBOT_WEEKLY_REVIEW_MODE": "single_stage", "DISCORD_BOT_TOKEN": "fake-token", "DISCORD_REVIEW_CHANNEL_ID": "review-channel"}
+        args = ["--db", str(self.db_path), "prepare-weekly-publish", "--topic", "lab_automation", "--cadence", "weekly"]
+        with patch.dict(os.environ, env, clear=True), patch("newsbot.cli.DiscordBotClient", FakeDiscordBotClient):
+            self.assertEqual(self._run_cli(args + ["--dry-run"]), 0)
+            self.assertEqual(store.get_draft(drafts[0].id).status, "approved_weekly")
+            self.assertEqual(store.get_draft(drafts[1].id).status, "ready_weekly")
+            self.assertEqual(self._run_cli(args), 0)
+        messages = FakeDiscordBotClient.instances[0].created_messages
+        self.assertEqual(len(messages), 2)
+        for message in messages:
+            self.assertEqual(message["channel_id"], "review-channel")
+            self.assertIn("Final digest is ready.", message["content"])
+            labels = [button["label"] for row in message["components"] for button in row["components"]]
+            self.assertEqual(labels, ["Reorder", "Publish Digest"])
+        self.assertEqual(store.get_draft(drafts[0].id).status, "final_ready")
+        self.assertEqual(store.get_draft(drafts[1].id).status, "final_ready")
+        self.assertEqual(store.get_draft(drafts[2].id).status, "pending")
+
     def test_legacy_notify_dry_run_records_notification_run(self):
         result = self._run_cli(
             [

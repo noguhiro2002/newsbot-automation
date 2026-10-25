@@ -73,7 +73,7 @@ class CustomIdTests(unittest.TestCase):
 
         self.assertEqual(
             labels,
-            ["Cancel Weekly", "Edit Draft", "Check Source", "Publish Breaking", "Hold", "Reject"],
+            ["Cancel Weekly", "Edit Draft", "Rewrite Draft", "Check Source", "Publish Breaking", "Hold", "Reject"],
         )
         self.assertLessEqual(max(len(row["components"]) for row in components), 5)
 
@@ -81,7 +81,7 @@ class CustomIdTests(unittest.TestCase):
         components = final_weekly_components("article-123")
         labels = [button["label"] for row in components for button in row["components"]]
 
-        self.assertEqual(labels, ["Publish", "Edit Draft", "Cancel"])
+        self.assertEqual(labels, ["Publish", "Edit Draft", "Rewrite Draft", "Cancel"])
         self.assertLessEqual(max(len(row["components"]) for row in components), 5)
 
     def test_final_digest_components_are_english(self):
