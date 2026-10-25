@@ -11,6 +11,13 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config" / "newsbot.config.json"
 
 
+def weekly_review_mode() -> str:
+    mode = os.getenv("NEWSBOT_WEEKLY_REVIEW_MODE", "").strip() or "two_stage"
+    if mode not in {"two_stage", "single_stage"}:
+        raise ValueError("NEWSBOT_WEEKLY_REVIEW_MODE must be two_stage or single_stage")
+    return mode
+
+
 @dataclass(frozen=True)
 class Destination:
     topic: str

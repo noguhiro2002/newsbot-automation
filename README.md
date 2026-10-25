@@ -191,6 +191,10 @@ This asks Codex CLI to search recent news, writes a payload under `payloads/`, v
 
 ### 6. Final weekly review and publish
 
+To approve each article only once, set `NEWSBOT_WEEKLY_REVIEW_MODE=single_stage` in `.env` and restart the bot. Use `Approve Weekly`, then `Preview Digest` → optional `Reorder` → `Publish Digest` to publish together. The default `two_stage` retains the per-article final review below.
+
+Editorial reasons are action-specific checkboxes supporting multiple selections, with `high_impact` first for approvals. `Rewrite Draft` generates five titles and five bodies using a separately configured `NEWSBOT_REWRITE_MODEL` (or a model entered in the form). Choose a title and body independently, then apply the combination. See the [Discord review workflow](docs/discord-review-workflow.md) for settings and usage.
+
 After reviewers click `Approve Weekly` during first screening:
 
 ```bash

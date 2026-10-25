@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from .config import DEFAULT_CONFIG_PATH, PROJECT_ROOT, load_config, load_discord_settings, resolve_project_path
+from .config import DEFAULT_CONFIG_PATH, PROJECT_ROOT, load_config, load_discord_settings, resolve_project_path, weekly_review_mode
 from .db import DEFAULT_DB_PATH, NewsbotStore
 from .discord_bot import run_bot
 from .discord_client import DiscordApiError, DiscordBotClient
@@ -28,7 +28,7 @@ from .render import (
     render_weekly_digest_overview,
     order_weekly_drafts,
 )
-from .review import final_digest_components, final_weekly_components, review_components
+from .review import final_digest_components, final_weekly_components, review_components, weekly_batches
 
 
 def load_dotenv(path: str | Path = ".env") -> None:
@@ -279,23 +279,31 @@ def cmd_prepare_weekly_publish(args: argparse.Namespace) -> int:
             raise ValueError("DISCORD_REVIEW_CHANNEL_ID is not set")
     client = DiscordBotClient(settings.bot_token) if not args.dry_run else None
 
-    if final_ready_drafts and not drafts:
-        message_text = (
-            "Final digest is ready.\n"
-            "Review the order below. Use Reorder if needed, then click Publish Digest.\n\n"
-            + render_weekly_digest_overview(final_ready_drafts)
+    if weekly_review_mode() == "single_stage":
+        final_ready_drafts = (
+            final_ready_drafts + drafts if args.dry_run
+            else store.prepare_single_stage_weekly(args.topic, args.cadence)
         )
-        if args.dry_run:
-            print(message_text)
-            print("")
-        else:
-            client.create_message(
-                settings.review_channel_id,
-                message_text,
-                components=final_digest_components(final_ready_drafts[0].id),
+        drafts = []
+
+    if final_ready_drafts and not drafts:
+        batches = weekly_batches(final_ready_drafts)
+        for batch in batches:
+            message_text = (
+                "Final digest is ready.\n"
+                "Review the order below. Use Reorder if needed, then click Publish Digest.\n\n"
+                + render_weekly_digest_overview(batch)
             )
+            if args.dry_run:
+                print(message_text)
+                print("")
+            else:
+                client.create_message(
+                    settings.review_channel_id, message_text,
+                    components=final_digest_components(batch[0].id),
+                )
         print("Prepared weekly final reviews: prepared=0, failed=0")
-        print("Prepared final digest preview: prepared=1, failed=0")
+        print(f"Prepared final digest preview: prepared={len(batches)}, failed=0")
         print(f"Review channel: {settings.review_channel_id or '(dry-run)'}")
         return 0
 

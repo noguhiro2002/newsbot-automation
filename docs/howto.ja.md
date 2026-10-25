@@ -181,12 +181,21 @@ Reviewerは各draftに対して以下を選べます。
 
 - `Approve Weekly`: 次回週次ダイジェスト候補にする。
 - `Edit Draft`: タイトル、本文、カテゴリ、タグ、メモ、source URLを修正する。
+- `Rewrite Draft`: 別のモデルでタイトルと本文を各5案生成し、選んだ組み合わせを下書きに反映する。
 - `Check Source`: Codex CLIでsource URLを確認・修正する。
 - `Publish Breaking`: 確認後に速報として公開する。
 - `Hold`: 保留にする。
 - `Reject`: 却下する。
 
 Reviewer操作は `DISCORD_REVIEWER_USER_IDS` に含まれるユーザーだけが実行できます。
+
+承認・保留・却下・公開取り消しの理由は、操作に適した選択肢をチェックボックスで複数選べます。承認では `high_impact` が先頭にあり、`duplicate`、`commercial_signal`、`already_covered` などの却下理由は表示されません。`other` を含める場合はメモが必要です。理由を複数選んでも判断件数は1件として記録し、それぞれの理由をフィードバック集計に反映します。
+
+`Rewrite Draft` の生成画面ではモデルと任意の修正方針を入力します。`.env` の `NEWSBOT_REWRITE_MODEL` にモデル名を設定すると、その値が初期表示されます。収集用モデルの設定は引き継ぎません。空欄の場合は生成のたびにモデルを指定してください。
+
+生成されたタイトル5案・本文5案を読み、タイトルと本文を別々に選択します。例えばタイトル2案目と本文5案目を組み合わせられます。プレビューを確認して `Apply` を押すと保存し、`Cancel` なら変更しません。選択画面の有効期限は10分です。生成・選択中に別の編集や公開があった場合は、上書きを防ぐため再生成が必要になります。
+
+生成の推論量は `NEWSBOT_REWRITE_REASONING_EFFORT`（既定値 `medium`）、制限時間は `NEWSBOT_REWRITE_TIMEOUT_SECONDS`（既定値300秒、1〜600秒）で設定できます。候補生成は元の記事情報に基づく文章の修正で、公開は行いません。
 
 見逃し記事は、Reviewer権限のある管理者が `/newsbot_record_missed url:<URL>` を実行すると、URLだけから登録できます。BotはCodexでページと関連する一次情報を調査し、正規URL、タイトル、組織、Phase、公開日、関連性の根拠を取得します。Lab Automationとの具体的な関連を確認できた場合だけ、`search_miss` として編集判断DBへ保存します。調査結果は実行者だけにephemeral表示され、通常チャンネルには投稿されません。調査モデル、reasoning、timeoutは `NEWSBOT_MISSED_ITEM_MODEL`、`NEWSBOT_MISSED_ITEM_REASONING_EFFORT`、`NEWSBOT_MISSED_ITEM_TIMEOUT_SECONDS` で設定できます。
 
@@ -200,6 +209,16 @@ python -m newsbot.cli research-missed \
 ```
 
 ## 8. Final weekly reviewを行う
+
+承認を1回にする場合は、`.env` に次を設定し、Botを再起動してください。Docker Composeの場合は、環境変数を反映するためサービスを再作成します。
+
+```dotenv
+NEWSBOT_WEEKLY_REVIEW_MODE=single_stage
+```
+
+このモードでは `Approve Weekly` だけで記事がダイジェストの対象になります。記事の確認を終えたら、採用済み記事の `Preview Digest` を押し、必要に応じて `Reorder` で並び替えてから `Publish Digest` でまとめて公開します。`/newsbot_prepare_weekly` または以下のCLIも、記事ごとの再レビューを挟まず一覧を投稿します。切り替え前に承認済みだった記事も対象になります。未確認・保留・却下・公開済みの記事は含めません。配信予定が異なる記事は別の一覧になります。
+
+既定値の `NEWSBOT_WEEKLY_REVIEW_MODE=two_stage` では、以下の公開前レビューを行います。`two_stage` に戻しても、すでにダイジェストの対象として承認した記事は取り消されません。
 
 週次候補を公開前に再確認する場合:
 

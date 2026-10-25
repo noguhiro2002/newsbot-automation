@@ -14,7 +14,7 @@ from .models import ArticleDraft, NewsItem, canonicalize_url, normalize_title, s
 
 
 DEFAULT_DB_PATH = PROJECT_ROOT / "data" / "newsbot.sqlite"
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 EDITORIAL_REASON_CODES = {
     "high_impact", "technical_novelty", "commercial_signal", "research_infrastructure",
     "safety_or_reliability", "editorial_balance", "event_value", "out_of_scope",
@@ -23,6 +23,45 @@ EDITORIAL_REASON_CODES = {
     "needs_more_verification", "defer", "timing_unclear", "search_miss", "other",
 }
 EDITORIAL_DECISIONS = {"accepted", "excluded", "delivery_cancelled", "missed"}
+
+APPROVAL_REASONS = (
+    "high_impact", "technical_novelty", "research_infrastructure",
+    "safety_or_reliability", "editorial_balance", "event_value", "other",
+)
+REJECTION_REASONS = (
+    "out_of_scope", "low_importance", "duplicate", "already_covered",
+    "commercial_signal", "stale_or_wrong_date", "insufficient_evidence",
+    "event_only_low_value", "source_quality", "too_generic", "other",
+)
+HOLD_REASONS = ("needs_more_verification", "defer", "timing_unclear", "insufficient_evidence", "source_quality", "other")
+
+
+def editorial_reasons_for_action(action: str) -> tuple[str, ...]:
+    if action in {"weekly", "ready_go", "breaking"}:
+        return APPROVAL_REASONS
+    if action == "reject":
+        return REJECTION_REASONS
+    if action == "hold":
+        return HOLD_REASONS
+    if action in {"cancel_weekly", "cancel_publish"}:
+        return REJECTION_REASONS[:-1] + ("defer", "timing_unclear", "other")
+    raise ValueError(f"Unsupported editorial action: {action}")
+
+
+def validate_editorial_reasons(
+    reason_codes: list[str] | tuple[str, ...], note: str = "", *, action: str | None = None,
+) -> tuple[str, ...]:
+    if isinstance(reason_codes, str) or not reason_codes:
+        raise ValueError("Select at least one editorial reason")
+    codes = tuple(dict.fromkeys(reason_codes))
+    for code in codes:
+        validate_editorial_reason(code, note)
+    if action is not None:
+        allowed = editorial_reasons_for_action(action)
+        if any(code not in allowed for code in codes):
+            raise ValueError("Selected reason is not applicable to this action")
+        codes = tuple(code for code in allowed if code in codes)
+    return codes
 
 
 def validate_editorial_reason(reason_code: str, note: str = "") -> None:
@@ -269,6 +308,9 @@ class NewsbotStore:
                     ON editorial_judgments(topic, cadence, created_at);
                 """
             )
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(editorial_judgments)")}
+            if "reason_codes_json" not in columns:
+                conn.execute("ALTER TABLE editorial_judgments ADD COLUMN reason_codes_json TEXT NOT NULL DEFAULT '[]'")
             conn.execute(
                 "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(?, ?)",
                 (SCHEMA_VERSION, utc_now()),
@@ -474,6 +516,7 @@ class NewsbotStore:
         tags: list[str] | tuple[str, ...] | None = None,
         reviewer_note: str | None = None,
         source_url: str | None = None,
+        expected_draft: ArticleDraft | None = None,
     ) -> ArticleDraft:
         before = self.get_draft(article_id)
         if before is None:
@@ -486,6 +529,14 @@ class NewsbotStore:
         after_event_hash = _event_hash_for_url_or_title(after_source_url, title_edited or before.title_original)
         now = utc_now()
         with self.connect() as conn:
+            if expected_draft is not None:
+                conn.execute("BEGIN IMMEDIATE")
+                row = conn.execute("SELECT * FROM article_drafts WHERE id = ?", (article_id,)).fetchone()
+                if row is None:
+                    raise KeyError(f"Draft not found: {article_id}")
+                current = self._row_to_draft(row)
+                if current.status == "published" or current.to_dict() != expected_draft.to_dict():
+                    raise ValueError("Draft changed since generation started. Generate new options before applying.")
             conn.execute(
                 """
                 UPDATE article_drafts
@@ -960,14 +1011,16 @@ class NewsbotStore:
         return selected
 
     def record_editorial_judgment(
-        self, *, decision: str, reason_code: str, reviewer_user_id: str,
+        self, *, decision: str, reviewer_user_id: str, reason_code: str = "",
+        reason_codes: list[str] | tuple[str, ...] | None = None,
         article_id: str | None = None, candidate_id: str | None = None,
         topic: str = "", cadence: str = "", canonical_url: str = "", title: str = "",
         phase: str = "", note: str = "", organization: str = "", domain: str = "",
     ) -> str:
         if decision not in EDITORIAL_DECISIONS:
             raise ValueError(f"Unsupported editorial decision: {decision}")
-        validate_editorial_reason(reason_code, note)
+        codes = validate_editorial_reasons(reason_codes if reason_codes is not None else [reason_code], note)
+        reason_code = codes[0]
         if article_id:
             draft = self.get_draft(article_id)
             if draft is None:
@@ -983,10 +1036,10 @@ class NewsbotStore:
             conn.execute(
                 """INSERT INTO editorial_judgments(id, article_id, candidate_id, topic, cadence,
                    canonical_url, title, phase, decision, reason_code, note, organization, domain,
-                   reviewer_user_id, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   reviewer_user_id, created_at, reason_codes_json) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (judgment_id, article_id, candidate_id, topic, cadence, canonicalize_url(canonical_url),
                  title, phase or None, decision, reason_code, note or None, organization or None,
-                 domain or None, reviewer_user_id, utc_now()),
+                 domain or None, reviewer_user_id, utc_now(), stable_json(list(codes))),
             )
         return judgment_id
 
@@ -1000,7 +1053,7 @@ class NewsbotStore:
         with self.connect() as conn:
             raw_rows = conn.execute(
                 """SELECT * FROM editorial_judgments WHERE topic = ? AND cadence = ?
-                   AND created_at >= ? AND created_at <= ? ORDER BY created_at DESC""",
+                   AND created_at >= ? AND created_at <= ? ORDER BY created_at DESC, rowid DESC""",
                 (topic, cadence, window_start.isoformat(timespec="seconds"), window_end.isoformat(timespec="seconds")),
             ).fetchall()
         seen_items: set[str] = set()
@@ -1017,12 +1070,14 @@ class NewsbotStore:
         positive_terms: set[str] = set()
         dynamic_watchlist: set[str] = set()
         dynamic_watchlist_by_phase: dict[str, set[str]] = {}
-        examples: list[dict[str, str]] = []
+        examples: list[dict[str, Any]] = []
         for row in rows:
             decisions[row["decision"]] = decisions.get(row["decision"], 0) + 1
-            reasons[row["reason_code"]] = reasons.get(row["reason_code"], 0) + 1
+            codes = json.loads(row["reason_codes_json"]) or [row["reason_code"]]
             decision_reasons = reasons_by_decision.setdefault(str(row["decision"]), {})
-            decision_reasons[row["reason_code"]] = decision_reasons.get(row["reason_code"], 0) + 1
+            for code in codes:
+                reasons[code] = reasons.get(code, 0) + 1
+                decision_reasons[code] = decision_reasons.get(code, 0) + 1
             if row["decision"] in {"accepted", "missed"} and row["phase"] in {"phase_4", "phase_4_papers"}:
                 positive_terms.update(normalize_title(str(row["title"])).split())
             if row["decision"] == "missed":
@@ -1030,7 +1085,7 @@ class NewsbotStore:
                 dynamic_watchlist.update(values)
                 if row["phase"]:
                     dynamic_watchlist_by_phase.setdefault(str(row["phase"]), set()).update(values)
-            examples.append({"title": str(row["title"]), "decision": str(row["decision"]), "reason_code": str(row["reason_code"]), "phase": str(row["phase"] or "")})
+            examples.append({"title": str(row["title"]), "decision": str(row["decision"]), "reason_code": str(row["reason_code"]), "reason_codes": codes, "phase": str(row["phase"] or "")})
         return {
             "lookback_weeks": lookback_weeks,
             "window_start": window_start.isoformat(timespec="seconds"),
@@ -1135,7 +1190,7 @@ class NewsbotStore:
             SELECT DISTINCT article_drafts.*
             FROM article_drafts
             JOIN review_actions ON review_actions.article_id = article_drafts.id
-            WHERE review_actions.action_type = 'cancel_weekly'
+            WHERE review_actions.action_type IN ('cancel_weekly', 'cancel_publish')
             ORDER BY review_actions.created_at DESC
         """
         params: list[Any] = []
@@ -1160,6 +1215,16 @@ class NewsbotStore:
                 table: int(conn.execute(f"SELECT COUNT(*) AS count FROM {table}").fetchone()["count"])
                 for table in tables
             }
+
+    def list_weekly_queue(self, topic: str, cadence: str, limit: int = 20) -> list[ArticleDraft]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM article_drafts WHERE topic = ? AND cadence = ? "
+                "AND status IN ('approved_weekly', 'ready_weekly', 'final_ready') "
+                "ORDER BY importance_score DESC, created_at ASC LIMIT ?",
+                (topic, cadence, limit),
+            ).fetchall()
+        return [self._row_to_draft(row) for row in rows]
 
     def list_approved_weekly(self, topic: str, cadence: str, limit: int | None = None) -> list[ArticleDraft]:
         sql = """
@@ -1203,6 +1268,29 @@ class NewsbotStore:
         with self.connect() as conn:
             rows = conn.execute(sql, params).fetchall()
         return [self._row_to_draft(row) for row in rows]
+
+    def prepare_single_stage_weekly(self, topic: str, cadence: str) -> list[ArticleDraft]:
+        """Include approvals made before switching modes without another review."""
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            rows = conn.execute(
+                "SELECT * FROM article_drafts WHERE topic = ? AND cadence = ? "
+                "AND status IN ('approved_weekly', 'ready_weekly')",
+                (topic, cadence),
+            ).fetchall()
+            for row in rows:
+                before = self._row_to_draft(row)
+                conn.execute(
+                    "UPDATE article_drafts SET status = 'final_ready', publish_type = 'weekly', updated_at = ? WHERE id = ?",
+                    (utc_now(), before.id),
+                )
+                after = self._row_to_draft(conn.execute("SELECT * FROM article_drafts WHERE id = ?", (before.id,)).fetchone())
+                conn.execute(
+                    "INSERT INTO review_actions(id, article_id, reviewer_user_id, action_type, before_json, after_json, created_at) "
+                    "VALUES(?, ?, ?, ?, ?, ?, ?)",
+                    (str(uuid.uuid4()), before.id, "system", "single_stage_prepare", stable_json(before.to_dict()), stable_json(after.to_dict()), utc_now()),
+                )
+        return self.list_final_ready_weekly(topic, cadence)
 
     def list_final_ready_weekly(self, topic: str, cadence: str, limit: int | None = None) -> list[ArticleDraft]:
         sql = """

@@ -19,6 +19,7 @@ Each draft review message includes:
 
 - `Approve Weekly`
 - `Edit Draft`
+- `Rewrite Draft`
 - `Check Source`
 - `Publish Breaking`
 - `Hold`
@@ -27,6 +28,20 @@ Each draft review message includes:
 Only users listed in `DISCORD_REVIEWER_USER_IDS` can use reviewer controls. If `DISCORD_ALLOWED_GUILD_ID` is set, interactions from other guilds are ignored.
 
 `Edit Draft` can update title, body, category, tags, reviewer note, and source URL.
+
+Editorial decisions use checkboxes with reasons specific to the action. Approval reasons start with `high_impact`; rejection reasons such as `duplicate`, `commercial_signal`, and `already_covered` are not offered for approval. Select one or more reasons. Selecting `other` also requires a note. All selected reasons are stored as one editorial decision and included in feedback statistics. Existing single-reason records remain supported.
+
+`Rewrite Draft` opens a form with a separate model setting and optional writing preferences. Set `NEWSBOT_REWRITE_MODEL` to the model you want to use; this does not inherit any collection or phase model setting. If it is blank, enter a model in the form. The bot generates five titles and five bodies from the existing article and source evidence using Codex CLI. Read the five options, select a title and a body independently, check the combined preview, and click `Apply`. `Cancel` leaves the draft unchanged. Changes to the draft during generation/selection require generating new options before applying. The selection expires after ten minutes.
+
+Optional settings: `NEWSBOT_REWRITE_REASONING_EFFORT=medium` and `NEWSBOT_REWRITE_TIMEOUT_SECONDS=300` (1–600 seconds). Rewriting preserves source URL, category, tags, and approval status; it does not publish the article.
+
+## One Review Before Publishing
+
+Set `NEWSBOT_WEEKLY_REVIEW_MODE=single_stage` in `.env` and restart the bot (recreate the service when using Docker Compose). Each `Approve Weekly` then selects the article directly for the digest. After reviewing the articles, click `Preview Digest` on a selected article, optionally `Reorder`, then `Publish Digest` to publish them together.
+
+`/newsbot_prepare_weekly` and `prepare-weekly-publish` also post digest previews in this mode. Approvals left over from the two-stage mode are included without another per-article review. Unreviewed, held, rejected, and published articles are excluded. Different scheduled batches get separate previews. Approval alone never publishes anything.
+
+The default `NEWSBOT_WEEKLY_REVIEW_MODE=two_stage` keeps the final per-article review described below. Changing the setting back does not revoke articles already selected for a digest.
 
 `Check Source` runs Codex CLI to verify the current source URL. If Codex finds a better replacement URL for the same article or event, the draft source URL is updated and the review message is refreshed.
 
@@ -42,6 +57,7 @@ Each final review candidate includes:
 
 - `Publish`
 - `Edit Draft`
+- `Rewrite Draft`
 - `Cancel`
 
 After every candidate has been judged, the bot posts a final digest preview:
