@@ -98,6 +98,12 @@ class NewsItem:
     tags: tuple[str, ...] = field(default_factory=tuple)
     importance_score: float = 0.0
     priority: str = "normal"
+    content_kind: str = "news"
+    published_date: str = ""
+    event_date_start: str = ""
+    event_date_end: str = ""
+    date_basis: str = "publication"
+    original_publication_date: str = ""
     raw: dict[str, Any] | None = None
 
     @property
@@ -144,6 +150,12 @@ class NewsItem:
             tags=coerce_tags(value.get("tags")),
             importance_score=importance_score,
             priority=str(value.get("priority") or "normal").strip() or "normal",
+            content_kind=str(value.get("content_kind") or "news").strip() or "news",
+            published_date=str(value.get("published_date") or "").strip(),
+            event_date_start=str(value.get("event_date_start") or "").strip(),
+            event_date_end=str(value.get("event_date_end") or "").strip(),
+            date_basis=str(value.get("date_basis") or "publication").strip() or "publication",
+            original_publication_date=str(value.get("original_publication_date") or "").strip(),
             raw=value,
         )
 
@@ -169,9 +181,12 @@ class NewsPayload:
         )
 
     @classmethod
-    def from_dict(cls, value: dict[str, Any]) -> "NewsPayload":
-        items = [NewsItem.from_dict(item) for item in value.get("items", [])]
-        if not items:
+    def from_dict(cls, value: dict[str, Any], *, allow_empty: bool = False) -> "NewsPayload":
+        raw_items = value.get("items")
+        if not isinstance(raw_items, list):
+            raise ValueError("Payload items must be a list")
+        items = [NewsItem.from_dict(item) for item in raw_items]
+        if not items and not allow_empty:
             raise ValueError("Payload must include at least one item")
         return cls(
             topic=str(value.get("topic") or "").strip(),
@@ -221,6 +236,26 @@ class ArticleDraft:
         except json.JSONDecodeError:
             return []
         return [str(item).strip() for item in value if str(item).strip()]
+
+    @property
+    def source_payload(self) -> dict[str, Any]:
+        try:
+            value = json.loads(self.source_payload_json or "{}")
+        except json.JSONDecodeError:
+            return {}
+        return value if isinstance(value, dict) else {}
+
+    @property
+    def content_kind(self) -> str:
+        return str(self.source_payload.get("content_kind") or "news")
+
+    @property
+    def event_date_start(self) -> str:
+        return str(self.source_payload.get("event_date_start") or "")
+
+    @property
+    def event_date_end(self) -> str:
+        return str(self.source_payload.get("event_date_end") or "")
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

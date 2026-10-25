@@ -95,6 +95,7 @@ def build_fixed_candidate_pool(
     stems = [source_run_stem(value) for value in source_runs]
     candidates_by_url: dict[str, dict[str, Any]] = {}
     origins_by_url: dict[str, list[dict[str, str]]] = {}
+    missing_optional_phase_outputs: list[str] = []
 
     for stem in stems:
         for phase in lab_automation_phase_definitions():
@@ -102,6 +103,9 @@ def build_fixed_candidate_pool(
                 f"{stem.name}.{phase.key}.json"
             )
             if not phase_path.exists():
+                if phase.key == "phase_5":
+                    missing_optional_phase_outputs.append(str(phase_path))
+                    continue
                 raise FileNotFoundError(
                     f"Missing source phase output: {phase_path}"
                 )
@@ -172,6 +176,7 @@ def build_fixed_candidate_pool(
         "candidate_count": len(pooled_candidates),
         "candidate_order_digest": candidate_order_digest,
         "source_runs": [stem.name for stem in stems],
+        "missing_optional_phase_outputs": missing_optional_phase_outputs,
         "phase_outputs": [phase_output],
     }
 

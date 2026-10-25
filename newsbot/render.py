@@ -113,15 +113,57 @@ def weekly_period_range(now: datetime | None = None) -> str:
     return f"{start:%Y/%m/%d} ~ {current:%Y/%m/%d}"
 
 
+def weekly_digest_section(draft: ArticleDraft) -> str:
+    return "Events" if draft.content_kind in {"event_announcement", "event_occurrence"} else "News"
+
+
+def order_weekly_drafts(drafts: list[ArticleDraft]) -> list[ArticleDraft]:
+    return [draft for section in ("News", "Events") for draft in drafts if weekly_digest_section(draft) == section]
+
+
 def render_weekly_digest_overview(drafts: list[ArticleDraft], now: datetime | None = None) -> str:
+    # Leave room for the shared preview's instructions in a Discord message.
+    # The private reorder editor and detail posts still show selected titles.
+    overview = _weekly_digest_overview(drafts, now)
+    if len(overview) <= 1850 or not drafts:
+        return overview
+    fixed_length = len(_weekly_digest_overview(drafts, now, title_limit=0))
+    title_limit = max(0, (1850 - fixed_length) // len(drafts))
+    return _weekly_digest_overview(drafts, now, title_limit=title_limit)
+
+
+def _weekly_digest_overview(
+    drafts: list[ArticleDraft], now: datetime | None, *, title_limit: int | None = None,
+) -> str:
     topic = topic_label(drafts[0].topic) if drafts else "News"
     lines = [
         f"今週の {topic} の注目ニュース！",
         weekly_period_range(now),
         "",
     ]
-    for index, draft in enumerate(drafts, start=1):
-        lines.append(f"{index}. {draft.title_edited or draft.title_original}")
+    ordered = order_weekly_drafts(drafts)
+    news = [draft for draft in ordered if weekly_digest_section(draft) == "News"]
+    events = [draft for draft in ordered if weekly_digest_section(draft) == "Events"]
+    current_index = 1
+
+    def title(draft: ArticleDraft) -> str:
+        text = " ".join((draft.title_edited or draft.title_original).split())
+        return truncate(text, title_limit) if title_limit is not None else text
+
+    if news:
+        lines.append("News")
+        for draft in news:
+            lines.append(f"{current_index}. {title(draft)}")
+            current_index += 1
+    if events:
+        if news:
+            lines.append("")
+        lines.append("Events")
+        for draft in events:
+            date = draft.event_date_start
+            date_suffix = f" ({date}{' - ' + draft.event_date_end if draft.event_date_end and draft.event_date_end != date else ''})" if date else ""
+            lines.append(f"{current_index}. {title(draft)}{date_suffix}")
+            current_index += 1
     lines.extend(
         [
             "",
@@ -134,15 +176,18 @@ def render_weekly_digest_overview(drafts: list[ArticleDraft], now: datetime | No
 def render_weekly_detail_message(draft: ArticleDraft, index: int, *, leading_gap: bool = False) -> str:
     title = truncate(draft.title_edited or draft.title_original, 300)
     body = truncate(draft.body_edited or draft.body_original, 1400)
-    message = "\n".join(
-        [
+    detail_lines = [
             f"{index}. **{title}**",
             "",
             body,
-            "",
-            f"Source: {draft.source_url}",
-        ]
-    ).strip()
+    ]
+    if draft.content_kind in {"event_announcement", "event_occurrence"} and draft.event_date_start:
+        event_range = draft.event_date_start
+        if draft.event_date_end and draft.event_date_end != draft.event_date_start:
+            event_range += f" - {draft.event_date_end}"
+        detail_lines.extend(["", f"Event date: {event_range}"])
+    detail_lines.extend(["", f"Source: {draft.source_url}"])
+    message = "\n".join(detail_lines).strip()
     if leading_gap:
         return "\u200b\n\n" + message
     return message

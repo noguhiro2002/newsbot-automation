@@ -183,6 +183,10 @@ Codex CLI が最近のニュースを検索し、`payloads/` にpayloadを保存
 
 ### 6. 最終レビューと公開
 
+記事の承認を1回にしたい場合は、`.env` に `NEWSBOT_WEEKLY_REVIEW_MODE=single_stage` を設定してBotを再起動します。`Approve Weekly` で採用した記事を、`Preview Digest` → 必要に応じて `Reorder` → `Publish Digest` の順でまとめて公開できます。既定の `two_stage` は、以下の公開前レビューを行う方式です。
+
+承認・保留・却下の理由は、操作に適した項目をチェックボックスで複数選べます。承認では `high_impact` が先頭です。文章を直したい場合は `Rewrite Draft` を押すと、タイトルと本文をそれぞれ5案生成し、別々に選んで組み合わせられます。生成モデルは `NEWSBOT_REWRITE_MODEL` または生成画面で指定します。詳しくは[操作ガイド](docs/howto.ja.md)を参照してください。
+
 1st screening で `Approve Weekly` した記事がある場合:
 
 ```bash

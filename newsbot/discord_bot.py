@@ -10,17 +10,23 @@ from pathlib import Path
 from time import monotonic
 from zoneinfo import ZoneInfo
 
-from .config import DEFAULT_CONFIG_PATH, PROJECT_ROOT, DiscordSettings, load_discord_settings
-from .db import NewsbotStore
+from .config import DEFAULT_CONFIG_PATH, PROJECT_ROOT, DiscordSettings, load_discord_settings, weekly_review_mode
+from .db import NewsbotStore, editorial_reasons_for_action, validate_editorial_reasons
 from .discord_client import parse_message_interval
 from .feedback import INTERESTED_EMOJI, record_interested_feedback
+from .missed_item import (
+    format_missed_item_result,
+    record_researched_missed_item,
+    research_missed_item_with_codex,
+)
 from .render import (
     render_published_message,
     render_review_message,
     render_weekly_detail_message,
     render_weekly_digest_overview,
+    order_weekly_drafts,
 )
-from .review import build_feedback_custom_id, build_review_custom_id
+from .review import build_feedback_custom_id, build_review_custom_id, weekly_batches
 from .source_check import SourceCheckResult, check_source_with_codex
 
 try:
@@ -273,6 +279,9 @@ def parse_review_message_for_modal(article_id: str, content: str | None) -> Draf
 
 
 if discord is not None:
+    from .rewrite_ui import RewriteDraftModal
+    from .reorder_ui import ReorderDigestView
+
     class ReviewActionsView(discord.ui.View):
         def __init__(
             self,
@@ -291,6 +300,7 @@ if discord is not None:
             actions.extend(
                 [
                     ("edit", "Edit Draft", discord.ButtonStyle.secondary),
+                    ("rewrite", "Rewrite Draft", discord.ButtonStyle.secondary),
                     ("check_source", "Check Source", discord.ButtonStyle.secondary),
                     ("breaking", "Publish Breaking", discord.ButtonStyle.danger),
                     ("hold", "Hold", discord.ButtonStyle.secondary),
@@ -315,6 +325,7 @@ if discord is not None:
             actions: list[tuple[str, str, discord.ButtonStyle]] = [
                 ("ready_go", "Publish", discord.ButtonStyle.success),
                 ("edit", "Edit Draft", discord.ButtonStyle.secondary),
+                ("rewrite", "Rewrite Draft", discord.ButtonStyle.secondary),
                 ("cancel_publish", "Cancel", discord.ButtonStyle.danger),
             ]
             for index, (action, label, style) in enumerate(actions):
@@ -328,12 +339,15 @@ if discord is not None:
                 )
 
     class FinalSelectedView(discord.ui.View):
-        def __init__(self, article_id: str):
+        def __init__(self, article_id: str, *, single_stage: bool = False):
             super().__init__(timeout=None)
             actions: list[tuple[str, str, discord.ButtonStyle]] = [
                 ("edit", "Edit Draft", discord.ButtonStyle.secondary),
+                ("rewrite", "Rewrite Draft", discord.ButtonStyle.secondary),
                 ("cancel_publish", "Cancel", discord.ButtonStyle.danger),
             ]
+            if single_stage:
+                actions.insert(0, ("preview_digest", "Preview Digest", discord.ButtonStyle.success))
             for index, (action, label, style) in enumerate(actions):
                 self.add_item(
                     discord.ui.Button(
@@ -362,73 +376,6 @@ if discord is not None:
                 )
             )
 
-    class ReorderDigestModal(discord.ui.Modal, title="Reorder Weekly Digest"):
-        def __init__(self, bot: "NewsbotDiscordBot", topic: str, cadence: str, scheduled_at: str, message):
-            super().__init__(timeout=300)
-            self.bot = bot
-            self.topic = topic
-            self.cadence = cadence
-            self.scheduled_at = scheduled_at
-            self.message = message
-            self.order_input = discord.ui.TextInput(
-                label="New order, e.g. 3,1,2,4",
-                placeholder="Use each current item number once.",
-                max_length=200,
-            )
-            self.add_item(self.order_input)
-
-        async def on_submit(self, interaction: discord.Interaction) -> None:
-            if not self.bot.is_allowed_guild(interaction):
-                await interaction.response.send_message("Interactions from this guild are not allowed.", ephemeral=True)
-                return
-            if not self.bot.is_reviewer(interaction.user.id):
-                await interaction.response.send_message("You are not allowed to operate reviewer controls.", ephemeral=True)
-                return
-
-            await interaction.response.defer(ephemeral=True, thinking=True)
-            drafts = await self.bot.db_call(
-                self.bot.store.list_final_ready_weekly_batch,
-                self.topic,
-                self.cadence,
-                self.scheduled_at,
-            )
-            if not drafts:
-                await interaction.followup.send("No final digest items are available to reorder.", ephemeral=True)
-                return
-            try:
-                order_numbers = [
-                    int(part.strip())
-                    for part in self.order_input.value.replace("\n", ",").split(",")
-                    if part.strip()
-                ]
-            except ValueError:
-                await interaction.followup.send("Order must contain numbers like 3,1,2,4.", ephemeral=True)
-                return
-            expected = list(range(1, len(drafts) + 1))
-            if sorted(order_numbers) != expected:
-                await interaction.followup.send(
-                    f"Order must use each number exactly once: {', '.join(str(value) for value in expected)}",
-                    ephemeral=True,
-                )
-                return
-            ordered_ids = [drafts[number - 1].id for number in order_numbers]
-            updated = await self.bot.db_call(
-                self.bot.store.reorder_final_ready_weekly,
-                self.topic,
-                self.cadence,
-                ordered_ids,
-                str(interaction.user.id),
-                self.scheduled_at,
-            )
-            content = (
-                "Final digest is ready.\n"
-                "Review the order below. Use Reorder if needed, then click Publish Digest.\n\n"
-                + render_weekly_digest_overview(updated)
-            )
-            if self.message:
-                await self.message.edit(content=content, view=DigestPublishView(updated[0].id), suppress=True)
-            await interaction.followup.send("Digest order updated.", ephemeral=True)
-
     class FeedbackView(discord.ui.View):
         def __init__(self, article_id: str, interested_count: int = 0):
             super().__init__(timeout=None)
@@ -441,11 +388,60 @@ if discord is not None:
                 )
             )
 
-    class BreakingConfirmView(discord.ui.View):
-        def __init__(self, bot: "NewsbotDiscordBot", article_id: str):
+    class EditorialDecisionModal(discord.ui.Modal, title="Editorial reason required"):
+        def __init__(self, bot: "NewsbotDiscordBot", article_id: str, action: str):
             super().__init__(timeout=300)
             self.bot = bot
             self.article_id = article_id
+            self.action = action
+            codes = editorial_reasons_for_action(action)
+            self.reason_groups = []
+            for offset in range(0, len(codes), 10):
+                options = codes[offset:offset + 10]
+                group = discord.ui.CheckboxGroup(
+                    required=len(codes) <= 10,
+                    min_values=1 if len(codes) <= 10 else 0,
+                    max_values=len(options),
+                    options=[discord.CheckboxGroupOption(label=code, value=code) for code in options],
+                )
+                self.reason_groups.append(group)
+                self.add_item(discord.ui.Label(
+                    text="Reasons (select one or more)" if offset == 0 else "More reasons",
+                    component=group,
+                ))
+            self.note = discord.ui.TextInput(
+                style=discord.TextStyle.paragraph,
+                required=False,
+                max_length=500,
+            )
+            self.add_item(discord.ui.Label(text="Note (required for other)", component=self.note))
+
+        async def on_submit(self, interaction: discord.Interaction) -> None:
+            if not await self.bot._require_reviewer(interaction):
+                return
+            try:
+                reason_codes = validate_editorial_reasons(
+                    [code for group in self.reason_groups for code in group.values],
+                    str(self.note.value).strip(), action=self.action,
+                )
+            except ValueError as exc:
+                await interaction.response.send_message(str(exc), ephemeral=True)
+                return
+            handler = getattr(self.bot, f"_handle_{self.action}")
+            await handler(
+                interaction,
+                self.article_id,
+                reason_codes=reason_codes,
+                reason_note=str(self.note.value).strip(),
+            )
+
+    class BreakingConfirmView(discord.ui.View):
+        def __init__(self, bot: "NewsbotDiscordBot", article_id: str, reason_codes: tuple[str, ...], reason_note: str):
+            super().__init__(timeout=300)
+            self.bot = bot
+            self.article_id = article_id
+            self.reason_codes = reason_codes
+            self.reason_note = reason_note
 
         @discord.ui.button(label="Confirm Breaking Publish", style=discord.ButtonStyle.danger)
         async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
@@ -494,6 +490,7 @@ if discord is not None:
                 "breaking",
             )
             latest = await self.bot.db_call(self.bot.store.get_draft, self.article_id)
+            await self.bot._record_editorial(self.article_id, str(interaction.user.id), "accepted", self.reason_codes, self.reason_note)
             if latest is not None:
                 await self.bot.db_call(
                     self.bot.store.record_review_action,
@@ -696,13 +693,16 @@ if discord is not None:
             super().__init__(intents=intents)
             self.store = store
             self.settings = settings
+            self.weekly_review_mode = weekly_review_mode()
             self.tree = discord.app_commands.CommandTree(self)
             self.discord_message_interval_seconds = parse_message_interval(
                 os.getenv("NEWSBOT_DISCORD_MESSAGE_INTERVAL_SECONDS", "1")
             )
             self._discord_send_lock = asyncio.Lock()
+            self._digest_order_lock = asyncio.Lock()
             self._last_discord_send_at = 0.0
             self._review_collection_task: asyncio.Task | None = None
+            self._rewrites_in_progress: set[str] = set()
 
         def is_reviewer(self, user_id: int) -> bool:
             return str(user_id) in self.settings.reviewer_user_ids
@@ -734,7 +734,7 @@ if discord is not None:
             if draft.status == "ready_weekly":
                 return FinalWeeklyView(draft.id)
             if draft.status == "final_ready":
-                return FinalSelectedView(draft.id)
+                return FinalSelectedView(draft.id, single_stage=self.weekly_review_mode == "single_stage")
             if draft.status == "approved_weekly":
                 return ReviewActionsView(draft.id, include_cancel=True)
             if draft.status == "held":
@@ -742,7 +742,7 @@ if discord is not None:
             if draft.status == "rejected":
                 return ReviewActionsView(draft.id, exclude={"reject"})
             if draft.status == "published":
-                return ReviewActionsView(draft.id, exclude={"weekly", "breaking", "hold", "reject"})
+                return ReviewActionsView(draft.id, exclude={"weekly", "rewrite", "breaking", "hold", "reject"})
             return ReviewActionsView(draft.id)
 
         def _register_app_commands(self) -> None:
@@ -782,6 +782,10 @@ if discord is not None:
                 name="newsbot_collect_reviews",
                 description="Manually collect and submit review candidate news.",
             )(self._cmd_collect_reviews)
+            self.tree.command(
+                name="newsbot_record_missed",
+                description="Investigate and register one missed Lab Automation URL.",
+            )(self._cmd_record_missed)
 
         async def on_ready(self) -> None:
             print(f"Discord bot connected as {self.user}")
@@ -820,6 +824,10 @@ if discord is not None:
                 await self._handle_priority(interaction, custom_id.rsplit(":", 1)[-1], "priority_down")
             elif custom_id.startswith("nb:review:edit:"):
                 await self._handle_edit(interaction, custom_id.rsplit(":", 1)[-1])
+            elif custom_id.startswith("nb:review:rewrite:"):
+                await self._handle_rewrite(interaction, custom_id.rsplit(":", 1)[-1])
+            elif custom_id.startswith("nb:review:preview_digest:"):
+                await self._handle_preview_digest(interaction, custom_id.rsplit(":", 1)[-1])
             elif custom_id.startswith("nb:review:check_source:"):
                 await self._handle_check_source(interaction, custom_id.rsplit(":", 1)[-1])
             elif custom_id.startswith("nb:review:breaking:"):
@@ -876,6 +884,16 @@ if discord is not None:
         async def db_call(self, func, *args, **kwargs):
             return await asyncio.to_thread(func, *args, **kwargs)
 
+        async def _record_editorial(self, article_id: str, user_id: str, decision: str, reason_codes: tuple[str, ...], note: str) -> None:
+            await self.db_call(
+                self.store.record_editorial_judgment,
+                article_id=article_id,
+                reviewer_user_id=user_id,
+                decision=decision,
+                reason_codes=reason_codes,
+                note=note,
+            )
+
         async def _require_reviewer(self, interaction: discord.Interaction) -> bool:
             if not self.is_allowed_guild(interaction):
                 await interaction.response.send_message("Interactions from this guild are not allowed.", ephemeral=True)
@@ -913,7 +931,7 @@ if discord is not None:
             if not await self._defer_admin_command(interaction):
                 return
             drafts = await self.db_call(
-                self.store.list_approved_weekly,
+                self.store.list_weekly_queue,
                 default_review_topic(),
                 default_review_cadence(),
                 20,
@@ -986,6 +1004,37 @@ if discord is not None:
             await interaction.response.send_message(
                 format_review_collection_confirmation(request),
                 view=ReviewCollectionConfirmView(self, request),
+                ephemeral=True,
+            )
+
+        async def _cmd_record_missed(self, interaction: discord.Interaction, url: str) -> None:
+            if not await self._defer_admin_command(interaction):
+                return
+            try:
+                result = await self.db_call(research_missed_item_with_codex, url)
+                if not result.relevant:
+                    await interaction.followup.send(
+                        format_missed_item_result(result, dry_run=True)
+                        + "\n\nThe URL was not registered because its Lab Automation relevance could not be verified.",
+                        ephemeral=True,
+                    )
+                    return
+                judgment_id = await self.db_call(
+                    record_researched_missed_item,
+                    self.store,
+                    result,
+                    reviewer_user_id=str(interaction.user.id),
+                    topic=default_review_topic(),
+                    cadence=default_review_cadence(),
+                )
+            except Exception as exc:  # noqa: BLE001 - report investigation failures to the requesting admin.
+                await interaction.followup.send(
+                    f"Could not investigate/register the missed URL: {exc}",
+                    ephemeral=True,
+                )
+                return
+            await interaction.followup.send(
+                format_missed_item_result(result, judgment_id=judgment_id),
                 ephemeral=True,
             )
 
@@ -1107,19 +1156,24 @@ if discord is not None:
             approved_drafts = await self.db_call(self.store.list_approved_weekly, topic, cadence)
             drafts = ready_drafts + approved_drafts
 
+            if self.weekly_review_mode == "single_stage":
+                final_ready_drafts = await self.db_call(self.store.prepare_single_stage_weekly, topic, cadence)
+                for draft in drafts:
+                    self.schedule_refresh_review_message(draft.id)
+                drafts = []
+
             if final_ready_drafts and not drafts:
-                content = (
-                    "Final digest is ready.\n"
-                    "Review the order below. Use Reorder if needed, then click Publish Digest.\n\n"
-                    + render_weekly_digest_overview(final_ready_drafts)
-                )
-                await self.send_channel_message(
-                    channel,
-                    content,
-                    view=DigestPublishView(final_ready_drafts[0].id),
-                    suppress_embeds=True,
-                )
-                return 0, 0, 1
+                batches = weekly_batches(final_ready_drafts)
+                for batch in batches:
+                    content = (
+                        "Final digest is ready.\n"
+                        "Review the order below. Use Reorder if needed, then click Publish Digest.\n\n"
+                        + render_weekly_digest_overview(batch)
+                    )
+                    await self.send_channel_message(
+                        channel, content, view=DigestPublishView(batch[0].id), suppress_embeds=True,
+                    )
+                return 0, 0, len(batches)
 
             prepared = 0
             failed = 0
@@ -1152,8 +1206,28 @@ if discord is not None:
                     print(f"newsbot: prepare weekly failed for draft {draft.id}: {exc}")
             return prepared, failed, 0
 
-        async def _handle_weekly(self, interaction: discord.Interaction, article_id: str) -> None:
+        async def _handle_preview_digest(self, interaction: discord.Interaction, article_id: str) -> None:
             if not await self._require_reviewer(interaction):
+                return
+            await interaction.response.defer(ephemeral=True, thinking=True)
+            draft = await self.db_call(self.store.get_draft, article_id)
+            if draft is None or draft.status != "final_ready":
+                await interaction.followup.send("This draft is no longer selected for a digest.", ephemeral=True)
+                return
+            try:
+                prepared, failed, previews = await self.prepare_weekly_publish(draft.topic, draft.cadence)
+            except Exception as exc:
+                await interaction.followup.send(f"Could not prepare the digest preview: {exc}", ephemeral=True)
+                return
+            await interaction.followup.send(
+                f"Digest previews posted: {previews}. Final reviews: {prepared}. Failed: {failed}.", ephemeral=True,
+            )
+
+        async def _handle_weekly(self, interaction: discord.Interaction, article_id: str, *, reason_codes: tuple[str, ...] = (), reason_note: str = "") -> None:
+            if not await self._require_reviewer(interaction):
+                return
+            if not reason_codes:
+                await interaction.response.send_modal(EditorialDecisionModal(self, article_id, "weekly"))
                 return
             await interaction.response.defer(ephemeral=True, thinking=True)
             draft = await self.db_call(self.store.get_draft, article_id)
@@ -1163,26 +1237,34 @@ if discord is not None:
             if draft.status == "published":
                 await interaction.followup.send("This draft cannot be approved for weekly publishing.", ephemeral=True)
                 return
+            if draft.status in {"approved_weekly", "ready_weekly", "final_ready"}:
+                await interaction.followup.send("This draft is already approved for weekly publishing.", ephemeral=True)
+                return
             scheduled_at = next_weekly_publish_at()
             updated = await self.db_call(
                 self.store.set_draft_status,
                 article_id,
-                "approved_weekly",
+                "final_ready" if self.weekly_review_mode == "single_stage" else "approved_weekly",
                 str(interaction.user.id),
                 publish_type="weekly",
                 scheduled_at=format_schedule(scheduled_at),
             )
+            await self._record_editorial(article_id, str(interaction.user.id), "accepted", reason_codes, reason_note)
             await interaction.followup.send(
-                "Draft approved for weekly publishing.\n"
-                f"Scheduled for: {format_schedule(scheduled_at)}\n\n"
+                ("Selected for the digest. Finish reviewing, then choose Preview Digest → Publish Digest.\n\n"
+                 if self.weekly_review_mode == "single_stage" else
+                 f"Draft approved for weekly publishing.\nScheduled for: {format_schedule(scheduled_at)}\n\n")
                 + render_review_message(updated),
                 view=self.review_view_for_draft(updated),
                 ephemeral=True,
             )
             self.schedule_refresh_review_message(article_id)
 
-        async def _handle_cancel_weekly(self, interaction: discord.Interaction, article_id: str) -> None:
+        async def _handle_cancel_weekly(self, interaction: discord.Interaction, article_id: str, *, reason_codes: tuple[str, ...] = (), reason_note: str = "") -> None:
             if not await self._require_reviewer(interaction):
+                return
+            if not reason_codes:
+                await interaction.response.send_modal(EditorialDecisionModal(self, article_id, "cancel_weekly"))
                 return
             await interaction.response.defer(ephemeral=True, thinking=True)
             draft = await self.db_call(self.store.get_draft, article_id)
@@ -1206,6 +1288,7 @@ if discord is not None:
                 draft.to_dict(),
                 updated.to_dict(),
             )
+            await self._record_editorial(article_id, str(interaction.user.id), "delivery_cancelled", reason_codes, reason_note)
             await interaction.followup.send(
                 "Weekly approval cancelled.\n\n" + render_review_message(updated),
                 view=self.review_view_for_draft(updated),
@@ -1268,8 +1351,11 @@ if discord is not None:
                 suppress_embeds=True,
             )
 
-        async def _handle_ready_go(self, interaction: discord.Interaction, article_id: str) -> None:
+        async def _handle_ready_go(self, interaction: discord.Interaction, article_id: str, *, reason_codes: tuple[str, ...] = (), reason_note: str = "") -> None:
             if not await self._require_reviewer(interaction):
+                return
+            if not reason_codes:
+                await interaction.response.send_modal(EditorialDecisionModal(self, article_id, "ready_go"))
                 return
             await interaction.response.defer(ephemeral=True, thinking=True)
             draft = await self.db_call(self.store.get_draft, article_id)
@@ -1289,6 +1375,7 @@ if discord is not None:
                 str(interaction.user.id),
                 publish_type="weekly",
             )
+            await self._record_editorial(article_id, str(interaction.user.id), "accepted", reason_codes, reason_note)
             await interaction.followup.send(
                 "Selected for the final digest.\n\n" + render_review_message(updated),
                 view=self.review_view_for_draft(updated),
@@ -1302,9 +1389,13 @@ if discord is not None:
                     suppress=True,
                 )
             await self._maybe_post_digest_ready_message(interaction, updated.topic, updated.cadence, updated.scheduled_at)
+            self.schedule_refresh_review_message(article_id)
 
-        async def _handle_cancel_publish(self, interaction: discord.Interaction, article_id: str) -> None:
+        async def _handle_cancel_publish(self, interaction: discord.Interaction, article_id: str, *, reason_codes: tuple[str, ...] = (), reason_note: str = "") -> None:
             if not await self._require_reviewer(interaction):
+                return
+            if not reason_codes:
+                await interaction.response.send_modal(EditorialDecisionModal(self, article_id, "cancel_publish"))
                 return
             await interaction.response.defer(ephemeral=True, thinking=True)
             draft = await self.db_call(self.store.get_draft, article_id)
@@ -1324,6 +1415,7 @@ if discord is not None:
                 draft.to_dict(),
                 updated.to_dict(),
             )
+            await self._record_editorial(article_id, str(interaction.user.id), "delivery_cancelled", reason_codes, reason_note)
             await interaction.followup.send(
                 "Cancelled from final publish. The draft returned to pending review.\n\n" + render_review_message(updated),
                 view=self.review_view_for_draft(updated),
@@ -1337,6 +1429,7 @@ if discord is not None:
                 )
             if should_check_completion:
                 await self._maybe_post_digest_ready_message(interaction, draft.topic, draft.cadence, draft.scheduled_at)
+            self.schedule_refresh_review_message(article_id)
 
         async def _publish_weekly_digest(
             self,
@@ -1344,6 +1437,14 @@ if discord is not None:
             topic: str,
             cadence: str,
             scheduled_at: str,
+        ) -> int:
+            # Keep publication on the same order that was read from the DB.
+            # A reorder waiting for publication will then see a stale snapshot.
+            async with self._digest_order_lock:
+                return await self._publish_weekly_digest_locked(interaction, topic, cadence, scheduled_at)
+
+        async def _publish_weekly_digest_locked(
+            self, interaction: discord.Interaction, topic: str, cadence: str, scheduled_at: str,
         ) -> int:
             drafts = await self.db_call(self.store.list_final_ready_weekly_batch, topic, cadence, scheduled_at)
             if not drafts:
@@ -1356,7 +1457,7 @@ if discord is not None:
             await self.send_channel_message(channel, render_weekly_digest_overview(drafts), suppress_embeds=True)
 
             published_count = 0
-            for index, queued_draft in enumerate(drafts, start=1):
+            for index, queued_draft in enumerate(order_weekly_drafts(drafts), start=1):
                 before = await self.db_call(self.store.get_draft, queued_draft.id)
                 message_text = render_weekly_detail_message(queued_draft, index, leading_gap=index == 1)
                 published = await self.send_channel_message(
@@ -1406,6 +1507,9 @@ if discord is not None:
             if draft is None:
                 await interaction.followup.send("Draft not found.", ephemeral=True)
                 return
+            if draft.status != "final_ready":
+                await interaction.followup.send("This preview is out of date. Prepare a new digest preview.", ephemeral=True)
+                return
             pending = await self.db_call(self.store.list_ready_weekly_batch, draft.topic, draft.cadence, draft.scheduled_at)
             if pending:
                 await interaction.followup.send(
@@ -1429,16 +1533,27 @@ if discord is not None:
         async def _handle_reorder_digest(self, interaction: discord.Interaction, article_id: str) -> None:
             if not await self._require_reviewer(interaction):
                 return
+            await interaction.response.defer(ephemeral=True, thinking=True)
             draft = await self.db_call(self.store.get_draft, article_id)
             if draft is None:
-                await interaction.response.send_message("Draft not found.", ephemeral=True)
+                await interaction.followup.send("Draft not found.", ephemeral=True)
                 return
             if draft.status != "final_ready":
-                await interaction.response.send_message("This draft is not in the final digest.", ephemeral=True)
+                await interaction.followup.send("This draft is not in the final digest.", ephemeral=True)
                 return
-            await interaction.response.send_modal(
-                ReorderDigestModal(self, draft.topic, draft.cadence, draft.scheduled_at, interaction.message)
+            drafts = await self.db_call(
+                self.store.list_final_ready_weekly_batch, draft.topic, draft.cadence, draft.scheduled_at,
             )
+            if not drafts:
+                await interaction.followup.send("並べ替える記事がありません。", ephemeral=True)
+                return
+            view = ReorderDigestView(self, drafts, interaction.user.id, interaction.message)
+            view.message = await interaction.followup.send(**view.preview(), ephemeral=True, wait=True)
+
+        async def _handle_rewrite(self, interaction: discord.Interaction, article_id: str) -> None:
+            if not await self._require_reviewer(interaction):
+                return
+            await interaction.response.send_modal(RewriteDraftModal(self, article_id))
 
         async def _handle_edit(self, interaction: discord.Interaction, article_id: str) -> None:
             if not await self._require_reviewer(interaction):
@@ -1513,18 +1628,24 @@ if discord is not None:
                 ephemeral=True,
             )
 
-        async def _handle_breaking(self, interaction: discord.Interaction, article_id: str) -> None:
+        async def _handle_breaking(self, interaction: discord.Interaction, article_id: str, *, reason_codes: tuple[str, ...] = (), reason_note: str = "") -> None:
             if not await self._require_reviewer(interaction):
+                return
+            if not reason_codes:
+                await interaction.response.send_modal(EditorialDecisionModal(self, article_id, "breaking"))
                 return
             await interaction.response.send_message(
                 "Do you want to publish this draft as breaking news?",
-                view=BreakingConfirmView(self, article_id),
+                view=BreakingConfirmView(self, article_id, reason_codes, reason_note),
                 ephemeral=True,
             )
             self.schedule_record_breaking_request(article_id, str(interaction.user.id))
 
-        async def _handle_hold(self, interaction: discord.Interaction, article_id: str) -> None:
+        async def _handle_hold(self, interaction: discord.Interaction, article_id: str, *, reason_codes: tuple[str, ...] = (), reason_note: str = "") -> None:
             if not await self._require_reviewer(interaction):
+                return
+            if not reason_codes:
+                await interaction.response.send_modal(EditorialDecisionModal(self, article_id, "hold"))
                 return
             await interaction.response.defer(ephemeral=True, thinking=True)
             draft = await self.db_call(self.store.get_draft, article_id)
@@ -1535,6 +1656,7 @@ if discord is not None:
                 await interaction.followup.send("This draft cannot be moved to hold.", ephemeral=True)
                 return
             updated = await self.db_call(self.store.set_draft_status, article_id, "held", str(interaction.user.id))
+            await self._record_editorial(article_id, str(interaction.user.id), "excluded", reason_codes, reason_note)
             await interaction.followup.send(
                 "Draft moved to hold. You can choose another action below.\n\n" + render_review_message(updated),
                 view=self.review_view_for_draft(updated),
@@ -1542,8 +1664,11 @@ if discord is not None:
             )
             self.schedule_refresh_review_message(article_id)
 
-        async def _handle_reject(self, interaction: discord.Interaction, article_id: str) -> None:
+        async def _handle_reject(self, interaction: discord.Interaction, article_id: str, *, reason_codes: tuple[str, ...] = (), reason_note: str = "") -> None:
             if not await self._require_reviewer(interaction):
+                return
+            if not reason_codes:
+                await interaction.response.send_modal(EditorialDecisionModal(self, article_id, "reject"))
                 return
             await interaction.response.defer(ephemeral=True, thinking=True)
             draft = await self.db_call(self.store.get_draft, article_id)
@@ -1554,6 +1679,7 @@ if discord is not None:
                 await interaction.followup.send("Published drafts cannot be rejected.", ephemeral=True)
                 return
             updated = await self.db_call(self.store.set_draft_status, article_id, "rejected", str(interaction.user.id))
+            await self._record_editorial(article_id, str(interaction.user.id), "excluded", reason_codes, reason_note)
             await interaction.followup.send(
                 "Draft rejected. You can choose another action below.\n\n" + render_review_message(updated),
                 view=self.review_view_for_draft(updated),

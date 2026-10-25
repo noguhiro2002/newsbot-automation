@@ -27,6 +27,14 @@ follow the
 [Crossref REST API etiquette and rate limits](https://www.crossref.org/documentation/retrieve-metadata/rest-api/access-and-authentication/).
 Crossref does not endorse Newsbot Automation.
 
+## ChemRxiv
+
+ChemRxiv metadata is retrieved exclusively through Crossref `posted-content`.
+The client uses the Crossref public or polite pool policy, serializes requests,
+caches responses, honors `Retry-After`, and backs off on HTTP 429 and transient
+server errors. Operators must continue to follow Crossref's current terms and
+published API guidance. ChemRxiv and Wiley do not endorse Newsbot Automation.
+
 ## Trademarks
 
 Discord and the Discord logo are trademarks of Discord Inc. Python and the

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .models import ArticleDraft
+
 
 VALID_REVIEW_ACTIONS = {
     "weekly",
@@ -10,6 +12,8 @@ VALID_REVIEW_ACTIONS = {
     "reorder_digest",
     "ready_go",
     "edit",
+    "rewrite",
+    "preview_digest",
     "breaking",
     "breaking_confirm",
     "check_source",
@@ -72,6 +76,7 @@ def review_components(
     actions.extend(
         [
             ("edit", 2, "Edit Draft"),
+            ("rewrite", 2, "Rewrite Draft"),
             ("check_source", 2, "Check Source"),
             ("breaking", 4, "Publish Breaking"),
             ("hold", 2, "Hold"),
@@ -104,6 +109,7 @@ def final_weekly_components(article_id: str) -> list[dict[str, object]]:
     actions: list[tuple[str, int, str]] = [
         ("ready_go", 3, "Publish"),
         ("edit", 2, "Edit Draft"),
+        ("rewrite", 2, "Rewrite Draft"),
         ("cancel_publish", 4, "Cancel"),
     ]
     components = [
@@ -147,3 +153,11 @@ def final_digest_components(article_id: str) -> list[dict[str, object]]:
             ],
         }
     ]
+
+
+def weekly_batches(drafts: list[ArticleDraft]) -> list[list[ArticleDraft]]:
+    """Keep each preview consistent with the schedule-scoped publish operation."""
+    batches: dict[str, list[ArticleDraft]] = {}
+    for draft in drafts:
+        batches.setdefault(draft.scheduled_at, []).append(draft)
+    return list(batches.values())

@@ -68,8 +68,9 @@ NEWSBOT_LAB_AUTOMATION_PHASE_1_REASONING_EFFORT=
 NEWSBOT_LAB_AUTOMATION_MASTER_MODEL=
 NEWSBOT_LAB_AUTOMATION_MASTER_REASONING_EFFORT=
 NEWSBOT_PAPER_API_RETMAX=
+NEWSBOT_PHASE_4_LLM_BATCH_SIZE=50
 NEWSBOT_NCBI_TOOL=newsbot_automation
-NEWSBOT_NCBI_EMAIL=
+NEWSBOT_NCBI_EMAIL=your-email@example.com
 NCBI_API_KEY=
 NEWSBOT_CROSSREF_MAILTO=
 NEWSBOT_API_CACHE_TTL_SECONDS=21600
@@ -82,13 +83,18 @@ NEWSBOT_LOOKBACK_DAYS=
 - `DISCORD_ALLOWED_GUILD_ID` は任意ですが、公開・共有環境では設定を推奨します。
 - `NEWSBOT_CODEX_BIN` が空の場合は `PATH` 上の `codex` を使います。
 - `NEWSBOT_CODEX_MODEL` が空の場合は Codex CLI 側のデフォルトモデルを使います。
-- `NEWSBOT_CODEX_REASONING_EFFORT` は `low`, `medium`, `high`, `xhigh` を指定できます。空の場合は Codex CLI 側のデフォルトです。
+- `NEWSBOT_CODEX_REASONING_EFFORT` は `low`, `medium`, `high`, `xhigh`, `max` を指定できます。空の場合は Codex CLI 側のデフォルトです。
 - `NEWSBOT_LAB_AUTOMATION_PHASE_<N>_MODEL` と `NEWSBOT_LAB_AUTOMATION_PHASE_<N>_REASONING_EFFORT` で、lab_automation multi-agent のPhase別デフォルトを指定できます。
 - `NEWSBOT_LAB_AUTOMATION_MASTER_MODEL` と `NEWSBOT_LAB_AUTOMATION_MASTER_REASONING_EFFORT` で、Master統合のデフォルトを指定できます。
-- `NEWSBOT_PAPER_API_RETMAX` はPhase 4の論文API取得件数です。空の場合は50です。
-- PubMedを使う前に、`NEWSBOT_NCBI_TOOL`と開発者の`NEWSBOT_NCBI_EMAIL`をNCBIへ登録してください。`NCBI_API_KEY`は任意です。
-- NCBIはAPIキーなしで3 request/秒、ありで10 request/秒に制限します。`NEWSBOT_CROSSREF_MAILTO`を設定するとCrossref polite poolを使います。
+- `NEWSBOT_PAPER_API_RETMAX` は旧名称を維持したPubMed/Crossrefの走査budgetです。空の場合は50ですが、意味判定通過後の候補を切り捨てる上限ではありません。
+- `NEWSBOT_PHASE_4_LLM_BATCH_SIZE` は1回のPhase 4 LLM呼び出しで判定するAPI候補数です。空の場合は50で、候補が多い場合は全候補を複数batchに分けて判定・統合します。
+- `NEWSBOT_NCBI_TOOL` は空白を含まない、このアプリを識別する名前です。通常は `newsbot_automation` のままで構いません。
+- `NEWSBOT_NCBI_EMAIL` は運用者・開発者本人の有効な連絡先メールアドレスです。第三者利用者のメールアドレスは指定しません。
+- PubMedを継続利用する場合は、使用するtool名、email、開発者または組織名を `eutilities@ncbi.nlm.nih.gov` に連絡して登録してください。
+- `NCBI_API_KEY` は任意です。このクライアントはキー設定時も3リクエスト/秒以下に制限します。PubMed IDはまとめてEFetchし、API呼び出し数を抑えます。
+- `NEWSBOT_CROSSREF_MAILTO`を設定するとCrossref polite poolを使います。
 - API responseは`data/api-cache/`へ`NEWSBOT_API_CACHE_TTL_SECONDS`の期間cacheします。
+- arXiv legacy APIは3秒に1回以下、同時接続1本に制限します。レート制御は`data/api-cache/`のlockを介して同一ホスト上の複数実行で共有します。
 - `NEWSBOT_LOOKBACK_DAYS` が空の場合は、前回成功実行時から今回実行時までを検索します。
 
 ## 4. DBを初期化する
@@ -138,16 +144,30 @@ Codexを呼ばずにpromptだけ確認する場合:
 python scripts/generate_payload_openai.py --topic lab_automation --skip-codex
 ```
 
-デフォルトのmulti-phase workflowでは、実際にCodexへ渡すpromptがPhase別の`.phase_1.prompt.txt`〜`.phase_4.prompt.txt`と`.master.prompt.txt`として保存されます。`prompts/lab_automation.md`を使う`--single-agent`の場合だけ、top-levelの`.prompt.txt`が保存されます。いずれも、テンプレートへ期間・保存先・設定パス・Interested feedback profileを差し込んだ後の実promptです。
+Phase 1〜5とMasterを本番DB・成功Run時刻・Discordから完全に分離して実行する場合:
+
+```bash
+python scripts/generate_payload_openai.py \
+  --topic lab_automation \
+  --cadence weekly \
+  --lookback-days 7 \
+  --codex-timeout 5400 \
+  --isolated-dry-run
+```
+
+デフォルトのmulti-phase workflowでは、Phase 1〜3は`.phase_N.structured.prompt.txt`と`.phase_N.broad.prompt.txt`に分かれ、別Codexセッションで並列実行されます。Phase 4も`.phase_4.api*.prompt.txt`と`.phase_4.broad.prompt.txt`に分かれ、API取得・batch判定とAPI非参照の独立論文検索を並列実行します。各試行は`.attempt_1` / `.attempt_2`付きのprompt・log・events・usageとして保存され、成功試行は従来の`.codex.log`等にも複製されます。Broad出力のquery一覧が誤って数値になった場合は、実際のCodex Web検索eventから文字列配列を復元して監査へ残します。Phase 5は`.phase_5.prompt.txt`、統合は`.master.prompt.txt`です。feed取得監査は`.feeds.audit.json`、レーン別時間・候補・Phase 5評価・feedback windowは`.run.audit.json`に保存されます。Phase 5は他Phaseの結果を受け取らずにPhase横断検索を行います。
 同じ日に複数回実行しても、実行時刻入りの別ファイルとして残ります。通常実行ではPhase別に`.json`、`.codex.log`、`.codex.events.jsonl`、`.codex.usage.json`も保存されます。
-Phase 4では、Codex実行前に論文API候補を取得し、`.phase_4.paper_api.json`にも保存します。従来のprompt-only探索に戻す場合は`--disable-paper-api`を指定します。
-論文API clientはrate limitとretry/backoffを適用します。coverageやpromptへ保存するquery metadataはredactされるため、`NCBI_API_KEY`は成果物やCodexへ渡りません。PubMed利用前に[Legal Notices](legal-notices.md)を確認してください。
+Phase 4では、arXiv / PubMed / bioRxiv / medRxiv / ChemRxiv / Crossref のAPI候補を共通の高再現率な一次意味判定へ通し、通過候補を件数で切り捨てず全件batch判定します。同時に、API候補・API query・watchlist・Phase 1〜3出力を渡さないBroadレーンが論文・preprintを白紙から検索します。両レーンはDOI、canonical URL、正規化titleで統合し、`api` / `broad` / 両方の来歴を保存します。API監査は`.phase_4.paper_api.json`、統合結果は`.phase_4.json`です。bioRxiv / medRxivは30件単位の全ページを取得後に判定します。ChemRxivはCrossref `posted-content`を唯一の機械取得経路とし、現行の`10.26434/chemrxiv.`と旧形式の`10.26434/chemrxiv-`をローカル判定したうえで、`/v2`、`-v2`、`.v2`を除いた論文単位で統合します。`--disable-paper-api`指定時もBroadレーンは実行します。
+Phase 1〜5には固定の候補出力上限を設けません。検証済みの適格候補はすべてMasterへ渡し、既定30件の制限は最終Master・Reviewer選定段階だけで適用します。APIページ走査の安全上限とPhase 4 LLM batch sizeは運用制御として維持しますが、意味判定通過候補を捨てる制限ではありません。
+論文API clientはrate limitとretry/backoffを適用します。ChemRxiv取得を含むCrossrefアクセスはPublic 5 request/秒・同時1接続または`mailto`付きPolite 10 request/秒（実装上は同時1接続）以下に制限し、429と`Retry-After`へ従います。coverageやpromptへ保存するquery metadataはredactされるため、`NCBI_API_KEY`は成果物やCodexへ渡りません。PubMed利用前に[Legal Notices](legal-notices.md)を確認してください。
 
 固定日数分だけ検索する場合:
 
 ```bash
 python scripts/generate_payload_openai.py --topic lab_automation --lookback-days 3 --submit-review
 ```
+
+検索期間を指定しない場合は、前回の成功時刻から今回の実行時刻までが対象になります。短時間で再実行すると、候補が0件になることがあります。0件の場合も結果JSONを保存して正常終了し、Discordへの投稿は省略します。通常実行では成功時刻を更新しますが、`--isolated-dry-run` では更新しません。直近1週間を再検索したい場合は `--lookback-days 7` を指定してください。
 
 同じReview候補作成はDiscordからも手動実行できます。Reviewer権限のあるユーザーが `/newsbot_collect_reviews` を実行すると、検索範囲の確認画面が表示されます。`Edit` で `topic`、`cadence`、`lookback days`、明示的な `period` を修正し、`Start` を押すと `generate_payload_openai.py --submit-review` が実行されます。処理中はReviewチャンネルにStatusメッセージが投稿され、進行状況と直近ログが更新されます。
 
@@ -163,6 +183,7 @@ Reviewerは各draftに対して以下を選べます。
 
 - `Approve Weekly`: 次回週次ダイジェスト候補にする。
 - `Edit Draft`: タイトル、本文、カテゴリ、タグ、メモ、source URLを修正する。
+- `Rewrite Draft`: 別のモデルでタイトルと本文を各5案生成し、選んだ組み合わせを下書きに反映する。
 - `Check Source`: Codex CLIでsource URLを確認・修正する。
 - `Publish Breaking`: 確認後に速報として公開する。
 - `Hold`: 保留にする。
@@ -170,7 +191,36 @@ Reviewerは各draftに対して以下を選べます。
 
 Reviewer操作は `DISCORD_REVIEWER_USER_IDS` に含まれるユーザーだけが実行できます。
 
+承認・保留・却下・公開取り消しの理由は、操作に適した選択肢をチェックボックスで複数選べます。承認では `high_impact` が先頭にあり、`duplicate`、`commercial_signal`、`already_covered` などの却下理由は表示されません。`other` を含める場合はメモが必要です。理由を複数選んでも判断件数は1件として記録し、それぞれの理由をフィードバック集計に反映します。
+
+`Rewrite Draft` の生成画面ではモデルと任意の修正方針を入力します。`.env` の `NEWSBOT_REWRITE_MODEL` にモデル名を設定すると、その値が初期表示されます。収集用モデルの設定は引き継ぎません。空欄の場合は生成のたびにモデルを指定してください。
+
+生成されたタイトル5案・本文5案を読み、タイトルと本文を別々に選択します。例えばタイトル2案目と本文5案目を組み合わせられます。プレビューを確認して `Apply` を押すと保存し、`Cancel` なら変更しません。選択画面の有効期限は10分です。生成・選択中に別の編集や公開があった場合は、上書きを防ぐため再生成が必要になります。
+
+生成の推論量は `NEWSBOT_REWRITE_REASONING_EFFORT`（既定値 `medium`）、制限時間は `NEWSBOT_REWRITE_TIMEOUT_SECONDS`（既定値300秒、1〜600秒）で設定できます。候補生成は元の記事情報に基づく文章の修正で、公開は行いません。
+
+見逃し記事は、Reviewer権限のある管理者が `/newsbot_record_missed url:<URL>` を実行すると、URLだけから登録できます。BotはCodexでページと関連する一次情報を調査し、正規URL、タイトル、組織、Phase、公開日、関連性の根拠を取得します。Lab Automationとの具体的な関連を確認できた場合だけ、`search_miss` として編集判断DBへ保存します。調査結果は実行者だけにephemeral表示され、通常チャンネルには投稿されません。調査モデル、reasoning、timeoutは `NEWSBOT_MISSED_ITEM_MODEL`、`NEWSBOT_MISSED_ITEM_REASONING_EFFORT`、`NEWSBOT_MISSED_ITEM_TIMEOUT_SECONDS` で設定できます。
+
+DiscordやDBへ書き込まず、同じURL調査だけを確認する場合:
+
+```bash
+python -m newsbot.cli research-missed \
+  --url 'https://example.com/news-item' \
+  --reviewer 'dry-run' \
+  --dry-run
+```
+
 ## 8. Final weekly reviewを行う
+
+承認を1回にする場合は、`.env` に次を設定し、Botを再起動してください。Docker Composeの場合は、環境変数を反映するためサービスを再作成します。
+
+```dotenv
+NEWSBOT_WEEKLY_REVIEW_MODE=single_stage
+```
+
+このモードでは `Approve Weekly` だけで記事がダイジェストの対象になります。記事の確認を終えたら、採用済み記事の `Preview Digest` を押し、必要に応じて `Reorder` で並び替えてから `Publish Digest` でまとめて公開します。`/newsbot_prepare_weekly` または以下のCLIも、記事ごとの再レビューを挟まず一覧を投稿します。切り替え前に承認済みだった記事も対象になります。未確認・保留・却下・公開済みの記事は含めません。配信予定が異なる記事は別の一覧になります。
+
+既定値の `NEWSBOT_WEEKLY_REVIEW_MODE=two_stage` では、以下の公開前レビューを行います。`two_stage` に戻しても、すでにダイジェストの対象として承認した記事は取り消されません。
 
 週次候補を公開前に再確認する場合:
 
@@ -186,8 +236,10 @@ Botがfinal reviewメッセージを投稿します。各記事に対して以�
 
 全件の判断が揃うと、Botが最終一覧を投稿します。
 
-- `Reorder`: Discord Modalを開き、`3,1,2,4` のように現在の番号を希望順で入力します。
+- `Reorder`: 自分だけに見える並べ替え画面を開きます。番号付きタイトルから記事を選び、「↑ 上へ」「↓ 下へ」「先頭へ」「末尾へ」で移動します。News / Events の区分内で移動でき、一覧と選択メニューは10件ずつページを切り替えます。移動した記事の選択は維持され、その記事のページへ移ります。長いタイトルは一覧では省略し、選択すると上部に全文を表示します。
 - `Publish Digest`: 表示順のまま公開します。
+
+並べ替えは「保存」で確定し、元の確認メッセージも更新します。「キャンセル」、10分間操作がない場合、Bot再起動では未保存の変更を破棄します。編集中に記事の追加・取り消し・公開・並び順や区分の変更があった場合は上書きせず、開き直す案内を表示します。保存後に表示更新だけ失敗した場合は保存済みと案内するため、再保存は不要です。
 
 実際の公開は `Publish Digest` を押したときだけ行われます。
 
@@ -242,6 +294,7 @@ Discordで使えます。
 - `/newsbot_refresh_reviews`
 - `/newsbot_prepare_weekly`
 - `/newsbot_collect_reviews`
+- `/newsbot_record_missed url:<URL>`
 
 ## 12. 動作確認
 

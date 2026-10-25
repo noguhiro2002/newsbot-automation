@@ -101,6 +101,7 @@ class MasterEvaluationTests(unittest.TestCase):
             pool_2["candidate_order_digest"],
         )
         self.assertEqual(pool_1["candidate_count"], 9)
+        self.assertEqual(len(pool_1["missing_optional_phase_outputs"]), 2)
         shared = next(
             item
             for item in pool_1["phase_outputs"][0]["candidates"]

@@ -20,7 +20,7 @@ Options:
                         luna-master-high, luna-phase1-xhigh,
                         luna-phase1-xhigh-master-high, or
                         luna-all-phases-xhigh-master-high.
-  --codex-timeout SEC   Timeout for each Codex phase. Default: 3600
+  --codex-timeout SEC   Timeout for each Codex phase. Default: 5400
   --paper-api-retmax N  Paper candidates fetched per API. Uses the app default if omitted.
   --stop-on-error       Stop after the first failed run. Default: continue and summarize.
   --help                Show this help.
@@ -42,7 +42,7 @@ codex_bin="${NEWSBOT_CODEX_BIN:-codex}"
 period=""
 repeats=3
 only_config=""
-codex_timeout=3600
+codex_timeout=5400
 paper_api_retmax=""
 execute_runs=0
 stop_on_error=0
@@ -152,6 +152,7 @@ phase_1_efforts=(high high high high high xhigh xhigh xhigh)
 phase_2_efforts=(high high high high high high high xhigh)
 phase_3_efforts=(high high high high high high high xhigh)
 phase_4_efforts=(high high high high high high high xhigh)
+phase_5_efforts=(high high high high high high high xhigh)
 master_models=(
   gpt-5.5
   gpt-5.6-terra
@@ -193,19 +194,19 @@ if [[ -n "$only_config" ]]; then
   selected_count=1
 fi
 total_runs=$((selected_count * repeats))
-total_codex_turns=$((total_runs * 5))
+total_codex_turns=$((total_runs * 6))
 
 echo "LLM model audit plan"
 echo "  repository: $app_dir"
 echo "  period: $period"
 echo "  repeats per configuration: $repeats"
 echo "  generator runs: $total_runs"
-echo "  Codex exec turns: $total_codex_turns (4 phases + 1 master per run)"
+echo "  Codex exec turns: $total_codex_turns (5 phases + 1 master per run)"
 echo "  Discord submission: disabled (--validate-only)"
 for index in "${!config_names[@]}"; do
   name="${config_names[$index]}"
   config_selected "$index" || continue
-  echo "  - $name: phase_1=${phase_models[$index]}/${phase_1_efforts[$index]}, phase_2=${phase_models[$index]}/${phase_2_efforts[$index]}, phase_3=${phase_models[$index]}/${phase_3_efforts[$index]}, phase_4=${phase_models[$index]}/${phase_4_efforts[$index]}, master=${master_models[$index]}/${master_efforts[$index]}"
+  echo "  - $name: phase_1=${phase_models[$index]}/${phase_1_efforts[$index]}, phase_2=${phase_models[$index]}/${phase_2_efforts[$index]}, phase_3=${phase_models[$index]}/${phase_3_efforts[$index]}, phase_4=${phase_models[$index]}/${phase_4_efforts[$index]}, phase_5=${phase_models[$index]}/${phase_5_efforts[$index]}, master=${master_models[$index]}/${master_efforts[$index]}"
 done
 
 if [[ "$execute_runs" -eq 0 ]]; then
@@ -279,10 +280,12 @@ for index in "${!config_names[@]}"; do
       --phase-model "phase_2=${phase_models[$index]}"
       --phase-model "phase_3=${phase_models[$index]}"
       --phase-model "phase_4=${phase_models[$index]}"
+      --phase-model "phase_5=${phase_models[$index]}"
       --phase-reasoning "phase_1=${phase_1_efforts[$index]}"
       --phase-reasoning "phase_2=${phase_2_efforts[$index]}"
       --phase-reasoning "phase_3=${phase_3_efforts[$index]}"
       --phase-reasoning "phase_4=${phase_4_efforts[$index]}"
+      --phase-reasoning "phase_5=${phase_5_efforts[$index]}"
       --master-model "${master_models[$index]}"
       --master-reasoning-effort "${master_efforts[$index]}"
       --validate-only
