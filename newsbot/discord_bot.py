@@ -280,6 +280,7 @@ def parse_review_message_for_modal(article_id: str, content: str | None) -> Draf
 
 if discord is not None:
     from .rewrite_ui import RewriteDraftModal
+    from .reorder_ui import ReorderDigestView
 
     class ReviewActionsView(discord.ui.View):
         def __init__(
@@ -374,73 +375,6 @@ if discord is not None:
                     custom_id=build_review_custom_id("publish_digest", article_id),
                 )
             )
-
-    class ReorderDigestModal(discord.ui.Modal, title="Reorder Weekly Digest"):
-        def __init__(self, bot: "NewsbotDiscordBot", topic: str, cadence: str, scheduled_at: str, message):
-            super().__init__(timeout=300)
-            self.bot = bot
-            self.topic = topic
-            self.cadence = cadence
-            self.scheduled_at = scheduled_at
-            self.message = message
-            self.order_input = discord.ui.TextInput(
-                label="New order, e.g. 3,1,2,4",
-                placeholder="Use each current item number once.",
-                max_length=200,
-            )
-            self.add_item(self.order_input)
-
-        async def on_submit(self, interaction: discord.Interaction) -> None:
-            if not self.bot.is_allowed_guild(interaction):
-                await interaction.response.send_message("Interactions from this guild are not allowed.", ephemeral=True)
-                return
-            if not self.bot.is_reviewer(interaction.user.id):
-                await interaction.response.send_message("You are not allowed to operate reviewer controls.", ephemeral=True)
-                return
-
-            await interaction.response.defer(ephemeral=True, thinking=True)
-            drafts = await self.bot.db_call(
-                self.bot.store.list_final_ready_weekly_batch,
-                self.topic,
-                self.cadence,
-                self.scheduled_at,
-            )
-            if not drafts:
-                await interaction.followup.send("No final digest items are available to reorder.", ephemeral=True)
-                return
-            try:
-                order_numbers = [
-                    int(part.strip())
-                    for part in self.order_input.value.replace("\n", ",").split(",")
-                    if part.strip()
-                ]
-            except ValueError:
-                await interaction.followup.send("Order must contain numbers like 3,1,2,4.", ephemeral=True)
-                return
-            expected = list(range(1, len(drafts) + 1))
-            if sorted(order_numbers) != expected:
-                await interaction.followup.send(
-                    f"Order must use each number exactly once: {', '.join(str(value) for value in expected)}",
-                    ephemeral=True,
-                )
-                return
-            ordered_ids = [drafts[number - 1].id for number in order_numbers]
-            updated = await self.bot.db_call(
-                self.bot.store.reorder_final_ready_weekly,
-                self.topic,
-                self.cadence,
-                ordered_ids,
-                str(interaction.user.id),
-                self.scheduled_at,
-            )
-            content = (
-                "Final digest is ready.\n"
-                "Review the order below. Use Reorder if needed, then click Publish Digest.\n\n"
-                + render_weekly_digest_overview(updated)
-            )
-            if self.message:
-                await self.message.edit(content=content, view=DigestPublishView(updated[0].id), suppress=True)
-            await interaction.followup.send("Digest order updated.", ephemeral=True)
 
     class FeedbackView(discord.ui.View):
         def __init__(self, article_id: str, interested_count: int = 0):
@@ -765,6 +699,7 @@ if discord is not None:
                 os.getenv("NEWSBOT_DISCORD_MESSAGE_INTERVAL_SECONDS", "1")
             )
             self._discord_send_lock = asyncio.Lock()
+            self._digest_order_lock = asyncio.Lock()
             self._last_discord_send_at = 0.0
             self._review_collection_task: asyncio.Task | None = None
             self._rewrites_in_progress: set[str] = set()
@@ -1503,6 +1438,14 @@ if discord is not None:
             cadence: str,
             scheduled_at: str,
         ) -> int:
+            # Keep publication on the same order that was read from the DB.
+            # A reorder waiting for publication will then see a stale snapshot.
+            async with self._digest_order_lock:
+                return await self._publish_weekly_digest_locked(interaction, topic, cadence, scheduled_at)
+
+        async def _publish_weekly_digest_locked(
+            self, interaction: discord.Interaction, topic: str, cadence: str, scheduled_at: str,
+        ) -> int:
             drafts = await self.db_call(self.store.list_final_ready_weekly_batch, topic, cadence, scheduled_at)
             if not drafts:
                 return 0
@@ -1590,16 +1533,22 @@ if discord is not None:
         async def _handle_reorder_digest(self, interaction: discord.Interaction, article_id: str) -> None:
             if not await self._require_reviewer(interaction):
                 return
+            await interaction.response.defer(ephemeral=True, thinking=True)
             draft = await self.db_call(self.store.get_draft, article_id)
             if draft is None:
-                await interaction.response.send_message("Draft not found.", ephemeral=True)
+                await interaction.followup.send("Draft not found.", ephemeral=True)
                 return
             if draft.status != "final_ready":
-                await interaction.response.send_message("This draft is not in the final digest.", ephemeral=True)
+                await interaction.followup.send("This draft is not in the final digest.", ephemeral=True)
                 return
-            await interaction.response.send_modal(
-                ReorderDigestModal(self, draft.topic, draft.cadence, draft.scheduled_at, interaction.message)
+            drafts = await self.db_call(
+                self.store.list_final_ready_weekly_batch, draft.topic, draft.cadence, draft.scheduled_at,
             )
+            if not drafts:
+                await interaction.followup.send("並べ替える記事がありません。", ephemeral=True)
+                return
+            view = ReorderDigestView(self, drafts, interaction.user.id, interaction.message)
+            view.message = await interaction.followup.send(**view.preview(), ephemeral=True, wait=True)
 
         async def _handle_rewrite(self, interaction: discord.Interaction, article_id: str) -> None:
             if not await self._require_reviewer(interaction):

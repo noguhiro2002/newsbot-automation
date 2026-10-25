@@ -181,9 +181,12 @@ class NewsPayload:
         )
 
     @classmethod
-    def from_dict(cls, value: dict[str, Any]) -> "NewsPayload":
-        items = [NewsItem.from_dict(item) for item in value.get("items", [])]
-        if not items:
+    def from_dict(cls, value: dict[str, Any], *, allow_empty: bool = False) -> "NewsPayload":
+        raw_items = value.get("items")
+        if not isinstance(raw_items, list):
+            raise ValueError("Payload items must be a list")
+        items = [NewsItem.from_dict(item) for item in raw_items]
+        if not items and not allow_empty:
             raise ValueError("Payload must include at least one item")
         return cls(
             topic=str(value.get("topic") or "").strip(),

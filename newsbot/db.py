@@ -741,18 +741,35 @@ class NewsbotStore:
         ordered_article_ids: list[str],
         reviewer_user_id: str,
         scheduled_at: str | None = None,
+        *,
+        expected_drafts: list[ArticleDraft] | None = None,
     ) -> list[ArticleDraft]:
-        current = (
-            self.list_final_ready_weekly_batch(topic, cadence, scheduled_at)
-            if scheduled_at is not None
-            else self.list_final_ready_weekly(topic, cadence)
-        )
-        current_ids = [draft.id for draft in current]
-        if sorted(current_ids) != sorted(ordered_article_ids):
-            raise ValueError("Reorder list must include every final-ready item exactly once")
-        before_json = [draft.to_dict() for draft in current]
-        total = len(ordered_article_ids)
+        """Reorder and audit atomically, optionally checking the editor's snapshot.
+
+        Snapshots use the store's order, before the UI groups News and Events.
+        Text edits may coexist with reordering; membership, priority and content
+        kind changes invalidate an open editor.
+        """
+        sql = "SELECT * FROM article_drafts WHERE topic = ? AND cadence = ? AND status = 'final_ready'"
+        params: list[Any] = [topic, cadence]
+        if scheduled_at is not None:
+            sql += " AND COALESCE(scheduled_at, '') = ?"
+            params.append(scheduled_at or "")
+        sql += " ORDER BY importance_score DESC, created_at ASC"
         with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            current = [self._row_to_draft(row) for row in conn.execute(sql, params).fetchall()]
+            if expected_drafts is not None:
+                def snapshot(drafts: list[ArticleDraft]) -> list[tuple]:
+                    return [(d.id, d.content_kind, d.importance_score, d.scheduled_at) for d in drafts]
+
+                if snapshot(current) != snapshot(expected_drafts):
+                    raise ValueError("The digest changed. Reopen Reorder to use the current items and order.")
+            if sorted(draft.id for draft in current) != sorted(ordered_article_ids):
+                raise ValueError("Reorder list must include every final-ready item exactly once")
+            before_json = stable_json([draft.to_dict() for draft in current])
+            now = utc_now()
+            total = len(ordered_article_ids)
             for index, article_id in enumerate(ordered_article_ids):
                 score = float(total - index)
                 conn.execute(
@@ -761,21 +778,16 @@ class NewsbotStore:
                     SET importance_score = ?, updated_at = ?
                     WHERE id = ?
                     """,
-                    (score, utc_now(), article_id),
+                    (score, now, article_id),
                 )
-        after = (
-            self.list_final_ready_weekly_batch(topic, cadence, scheduled_at)
-            if scheduled_at is not None
-            else self.list_final_ready_weekly(topic, cadence)
-        )
-        for draft in after:
-            self.record_review_action(
-                draft.id,
-                reviewer_user_id,
-                "reorder_digest",
-                before_json=before_json,
-                after_json=[item.to_dict() for item in after],
-            )
+            after = [self._row_to_draft(row) for row in conn.execute(sql, params).fetchall()]
+            after_json = stable_json([draft.to_dict() for draft in after])
+            for draft in after:
+                conn.execute(
+                    "INSERT INTO review_actions(id, article_id, reviewer_user_id, action_type, before_json, after_json, created_at) "
+                    "VALUES(?, ?, ?, ?, ?, ?, ?)",
+                    (str(uuid.uuid4()), draft.id, reviewer_user_id, "reorder_digest", before_json, after_json, now),
+                )
         return after
 
     def mark_review_message(self, article_id: str, channel_id: str, message_id: str) -> None:

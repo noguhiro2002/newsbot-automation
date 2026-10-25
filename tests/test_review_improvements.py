@@ -6,6 +6,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
+import discord
+from discord.webhook.async_ import async_context
+
 from newsbot.config import DiscordSettings, weekly_review_mode
 from newsbot.db import NewsbotStore, validate_editorial_reasons
 from newsbot.discord_bot import NewsbotDiscordBot
@@ -26,6 +29,7 @@ def interaction(user_id=7):
     return SimpleNamespace(
         user=SimpleNamespace(id=user_id), guild_id=1,
         response=SimpleNamespace(defer=AsyncMock(), send_message=AsyncMock(), send_modal=AsyncMock(), edit_message=AsyncMock()),
+        edit_original_response=AsyncMock(),
         followup=SimpleNamespace(send=AsyncMock()),
         message=SimpleNamespace(edit=AsyncMock(), content=""),
     )
@@ -194,7 +198,13 @@ class ReviewBotWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(view.apply.disabled)
         self.assertIn("Title 1", view.preview())
         self.assertIn("Body 4", view.preview())
-        await view.apply.callback(interaction())
+        event = interaction()
+        event.message.edit.side_effect = AssertionError("Ephemeral messages must not use the channel edit API")
+        await view.apply.callback(event)
+        event.response.defer.assert_awaited_once_with(thinking=False)
+        event.edit_original_response.assert_awaited_once()
+        self.assertIsNone(event.edit_original_response.call_args.kwargs["view"])
+        self.assertTrue(view.is_finished())
         updated = self.store.get_draft(draft.id)
         self.assertEqual((updated.title_edited, updated.body_edited), ("Title 1", "Body 4"))
         for field in ("source_url", "category_primary", "tags_json", "status", "scheduled_at", "source_payload_json"):
@@ -202,6 +212,88 @@ class ReviewBotWorkflowTests(unittest.IsolatedAsyncioTestCase):
         with self.store.connect() as conn:
             after = json.loads(conn.execute("SELECT after_json FROM review_actions WHERE action_type = 'edit'").fetchone()[0])
         self.assertIn("title=2; body=5", after["reviewer_note"])
+
+    async def test_rewrite_uses_discord_component_update_and_interaction_webhook(self):
+        # Use the real SDK Interaction/Message objects, mocking only transport.
+        # A generic AsyncMock for Message.edit would hide the original 404 bug.
+        for stale in (False, True):
+            with self.subTest(stale=stale):
+                draft = add_draft(self.store, f"sdk-{stale}")
+                view = RewriteChoiceView(self.bot, draft, self.options(), 7)
+                view.title_index, view.body_index = 1, 4
+                if stale:
+                    self.store.update_draft_text(draft.id, "Later edit", "Later body", "8")
+                message_data = {
+                    "id": "123", "channel_id": "10", "type": 0, "content": "Choose options",
+                    "flags": 64, "author": {"id": "99", "username": "bot", "discriminator": "0", "avatar": None},
+                }
+                self.bot._connection.user = discord.ClientUser(state=self.bot._connection, data=message_data["author"])
+                event = discord.Interaction(data={
+                    "id": "456", "application_id": "99", "type": 3, "version": 1,
+                    "token": "fake-interaction-token", "attachment_size_limit": 1000000,
+                    "guild_id": "1", "channel": {"id": "10", "type": 0, "name": "review", "position": 0, "permission_overwrites": []},
+                    "member": {"user": {"id": "7", "username": "reviewer", "discriminator": "0", "avatar": None},
+                               "roles": [], "joined_at": None, "flags": 0},
+                    "message": message_data, "data": {"custom_id": view.apply.custom_id, "component_type": 2},
+                }, state=self.bot._connection)
+                self.assertTrue(event.message.flags.ephemeral)
+                self.assertIs(type(event.message), discord.Message)
+                adapter = SimpleNamespace(
+                    create_interaction_response=AsyncMock(return_value={"interaction": {"id": "456"}}),
+                    edit_original_interaction_response=AsyncMock(return_value=message_data),
+                )
+                token = async_context.set(adapter)
+                try:
+                    with patch.object(self.bot.http, "edit_message", new_callable=AsyncMock) as channel_edit, patch.object(
+                        discord.Webhook, "send", new_callable=AsyncMock,
+                    ) as followup:
+                        channel_edit.side_effect = discord.NotFound(
+                            SimpleNamespace(status=404, reason="Not Found"), {"code": 10008, "message": "Unknown Message"},
+                        )
+                        self.assertTrue(await view.interaction_check(event))
+                        await view.apply.callback(event)
+                        channel_edit.assert_not_awaited()
+                        followup.assert_awaited_once()
+                finally:
+                    async_context.reset(token)
+                self.assertEqual(adapter.create_interaction_response.call_args.kwargs["params"].payload["type"], 6)
+                self.assertEqual(event.response.type, discord.InteractionResponseType.deferred_message_update)
+                edit = adapter.edit_original_interaction_response
+                edit.assert_awaited_once()
+                self.assertEqual(edit.call_args.args[:2], (99, "fake-interaction-token"))
+                self.assertEqual(edit.call_args.kwargs["payload"]["components"], [])
+                self.assertIn("out of date" if stale else "Draft updated", edit.call_args.kwargs["payload"]["content"])
+                self.assertEqual(self.store.get_draft(draft.id).title_edited, "Later edit" if stale else "Title 1")
+                self.assertTrue(view.is_finished())
+
+    async def test_missing_choice_message_after_save_still_confirms_success_and_stops(self):
+        view = RewriteChoiceView(self.bot, self.draft, self.options(), 7)
+        view.title_index, view.body_index = 1, 4
+        event = interaction()
+        event.edit_original_response.side_effect = discord.NotFound(
+            SimpleNamespace(status=404, reason="Not Found"), {"code": 10008, "message": "Unknown Message"},
+        )
+        with self.assertLogs("newsbot.rewrite_ui", level="WARNING"):
+            await view.apply.callback(event)
+        self.assertEqual(self.store.get_draft(self.draft.id).title_edited, "Title 1")
+        self.assertEqual(self.store.get_draft(self.draft.id).body_edited, "Body 4")
+        event.followup.send.assert_awaited_once_with("Selected title and body applied to the draft.", ephemeral=True)
+        self.bot.schedule_refresh_review_message.assert_called_once_with(self.draft.id)
+        self.assertTrue(view.finished)
+        self.assertTrue(view.is_finished())
+        self.assertFalse(await view.interaction_check(interaction()))
+
+    async def test_failed_save_keeps_selection_open_for_retry(self):
+        view = RewriteChoiceView(self.bot, self.draft, self.options(), 7)
+        view.title_index, view.body_index = 1, 4
+        event = interaction()
+        with patch.object(self.store, "update_draft_text", side_effect=RuntimeError("DB unavailable")):
+            await view.apply.callback(event)
+        self.assertFalse(view.finished)
+        self.assertFalse(view.is_finished())
+        self.assertEqual(self.store.get_draft(self.draft.id).to_dict(), self.draft.to_dict())
+        event.edit_original_response.assert_not_awaited()
+        event.followup.send.assert_awaited_once_with("Could not save the draft. Try Apply again.", ephemeral=True)
 
     async def test_cancel_expiry_and_wrong_user_leave_draft_untouched(self):
         view = RewriteChoiceView(self.bot, self.draft, self.options(), 7)

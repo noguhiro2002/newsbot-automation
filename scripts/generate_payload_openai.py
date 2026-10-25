@@ -1383,8 +1383,8 @@ def final_agent_message(events: list[dict[str, Any]]) -> str:
     return messages[-1].strip() if messages else ""
 
 
-def validate_payload_dict(payload: dict[str, Any], *, config_path: Path) -> NewsPayload:
-    parsed = NewsPayload.from_dict(payload)
+def validate_payload_dict(payload: dict[str, Any], *, config_path: Path, allow_empty: bool = False) -> NewsPayload:
+    parsed = NewsPayload.from_dict(payload, allow_empty=allow_empty)
     if not parsed.topic:
         raise ValueError("Payload must include topic")
     if not parsed.cadence:
@@ -1403,7 +1403,7 @@ def select_review_items(
     preference_profile: dict[str, Any] | None,
     limit: int,
 ) -> dict[str, Any]:
-    parsed = NewsPayload.from_dict(payload)
+    parsed = NewsPayload.from_dict(payload, allow_empty=True)
     selected = rank_news_items(parsed.items, preference_profile=preference_profile, limit=limit)
     updated = dict(payload)
     updated["items"] = [item.raw or {} for item in selected]
@@ -2748,7 +2748,7 @@ def main(argv: list[str] | None = None) -> int:
     log_step(f"parsed payload JSON: raw_items={raw_item_count}")
     payload = select_review_items(payload, preference_profile=audience_profile, limit=review_limit)
     log_step(f"ranked and selected review items: selected_items={len(payload.get('items') or [])}")
-    parsed = validate_payload_dict(payload, config_path=config_path)
+    parsed = validate_payload_dict(payload, config_path=config_path, allow_empty=True)
     log_step("payload passed local schema/config validation")
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2769,16 +2769,23 @@ def main(argv: list[str] | None = None) -> int:
     log_step(f"wrote payload: {output_path}")
     log_step(f"wrote Codex log: {codex_log_label}")
 
-    log_step("running validate-payload")
-    validate_code = run_newsbot_command(["validate-payload", "--input", str(output_path)])
-    if validate_code != 0:
-        log_step("validate-payload failed; not updating last-run state")
-        return validate_code
+    if parsed.items:
+        log_step("running validate-payload")
+        validate_code = run_newsbot_command(["validate-payload", "--input", str(output_path)])
+        if validate_code != 0:
+            log_step("validate-payload failed; not updating last-run state")
+            return validate_code
+    else:
+        log_step("no eligible items found; saved empty result and skipping Discord submission")
     if args.isolated_dry_run:
         log_step("isolated dry-run: successful-run state was not updated")
     else:
         write_last_run(run_state_path(args.topic, args.cadence))
         log_step(f"updated last-run state: {run_state_path(args.topic, args.cadence)}")
+
+    if not parsed.items:
+        log_step("finished Codex payload generation workflow: no new items")
+        return 0
 
     if args.validate_only or not (args.submit_review or args.submit_dry_run):
         log_step("done; submit-review was not requested")

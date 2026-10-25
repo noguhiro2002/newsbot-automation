@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 import discord
@@ -9,6 +10,9 @@ from .models import ArticleDraft
 
 if TYPE_CHECKING:
     from .discord_bot import NewsbotDiscordBot
+
+
+logger = logging.getLogger(__name__)
 
 
 class RewriteDraftModal(discord.ui.Modal, title="Generate Draft Options"):
@@ -72,7 +76,7 @@ class RewriteChoiceView(discord.ui.View):
         self.user_id = user_id
         self.title_index: int | None = None
         self.body_index: int | None = None
-        self.message = None
+        self.message: discord.WebhookMessage | None = None
         self.finished = False
         self.title_select = discord.ui.Select(
             placeholder="Choose a title", row=0,
@@ -128,7 +132,9 @@ class RewriteChoiceView(discord.ui.View):
             await interaction.response.send_message("Choose both a title and a body before applying.", ephemeral=True)
             return
         self.finished = True
-        await interaction.response.defer(ephemeral=True, thinking=True)
+        # A component update keeps the ephemeral choice message as the original
+        # response. thinking=True would instead create a separate response.
+        await interaction.response.defer(thinking=False)
         try:
             await self.bot.db_call(
                 self.bot.store.update_draft_text,
@@ -137,22 +143,26 @@ class RewriteChoiceView(discord.ui.View):
                 reviewer_note=f"Rewrite model={self.options.model}; title={self.title_index + 1}; body={self.body_index + 1}",
             )
         except (KeyError, ValueError) as exc:
-            await interaction.followup.send(str(exc), ephemeral=True)
-            if interaction.message:
-                await interaction.message.edit(content="These options are out of date. Generate new options to continue.", view=None)
+            content = "These options are out of date. Generate new options to continue."
+            confirmation = str(exc)
         except Exception:
             self.finished = False
             await interaction.followup.send("Could not save the draft. Try Apply again.", ephemeral=True)
             return
         else:
             self.bot.schedule_refresh_review_message(self.draft.id)
-            if interaction.message:
-                await interaction.message.edit(
-                    content="Draft updated.\n\n" + self.preview(), view=None,
-                    allowed_mentions=discord.AllowedMentions.none(),
-                )
-            await interaction.followup.send("Selected title and body applied to the draft.", ephemeral=True)
+            content = "Draft updated.\n\n" + self.preview()
+            confirmation = "Selected title and body applied to the draft."
+        # Saving has finished. A failed UI update must not leave an active view
+        # or suggest retrying an edit that was already committed.
         self.stop()
+        try:
+            await interaction.edit_original_response(
+                content=content, view=None, allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except discord.HTTPException:
+            logger.warning("Could not update rewrite selection message for draft %s", self.draft.id, exc_info=True)
+        await interaction.followup.send(confirmation, ephemeral=True)
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, row=2)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:

@@ -62,8 +62,10 @@ Each final review candidate includes:
 
 After every candidate has been judged, the bot posts a final digest preview:
 
-- `Reorder`: opens a Discord Modal. Enter the current item numbers in the desired order, for example `3,1,2,4`.
+- `Reorder`: opens a private editor with numbered article titles and up/down/first/last buttons. Articles stay within News or Events. Page through 10 items at a time; the selection follows a moved article. Long titles are shortened in the list and shown in full above it when selected.
 - `Publish Digest`: publishes the overview and detail messages in the displayed order.
+
+Use `保存` (save) to commit the order and refresh the shared preview. `キャンセル` (cancel), 10 minutes of inactivity, or a bot restart discards unsaved changes. Changes to the digest's membership, order, or sections invalidate an open editor, which must be reopened. Order changes and review history are committed together. A message refresh failure after saving is reported as a successful save; no second save is needed.
 
 Public weekly publishing happens only after `Publish Digest`.
 
