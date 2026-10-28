@@ -4,7 +4,7 @@ umask 077
 
 usage() {
   cat <<'USAGE'
-Run one Newsbot scheduled task from cron.
+Run one Newsbot scheduled task from cron or systemd.
 
 Usage:
   scripts/run_cron_task.sh [options] generate-review
@@ -143,7 +143,6 @@ run_smoke_test() {
     echo "every_days=${NEWSBOT_GENERATE_REVIEW_EVERY_DAYS:-2}"
     if [[ -n "${NEWSBOT_CODEX_BIN:-}" ]]; then
       echo "codex_bin=$NEWSBOT_CODEX_BIN"
-      command -v node
       "$NEWSBOT_CODEX_BIN" --version
     else
       command -v codex
@@ -193,14 +192,16 @@ run_generate_review() {
     )
     if [[ "$skip_codex" -eq 1 ]]; then
       generate_args+=(--skip-codex)
-    else
-      generate_args+=(--submit-review)
     fi
 
     cd "$app_dir"
-    "$python_bin" scripts/generate_payload_openai.py \
-      "${generate_args[@]}" \
-      "${codex_bin_args[@]}"
+    if [[ "$skip_codex" -eq 1 ]]; then
+      "$python_bin" scripts/generate_payload_openai.py \
+        "${generate_args[@]}" \
+        "${codex_bin_args[@]}"
+    else
+      "$python_bin" scripts/run_scheduled_job.py generate-review
+    fi
     if [[ "$skip_codex" -eq 0 ]]; then
       date +%s >"$state_file.tmp"
       mv "$state_file.tmp" "$state_file"

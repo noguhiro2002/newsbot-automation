@@ -1278,8 +1278,35 @@ def run_codex(
     output = output_last_message.read_text(encoding="utf-8", errors="replace").strip()
     output_last_message.unlink(missing_ok=True)
     if result.returncode != 0:
-        raise RuntimeError(f"codex exec failed with exit code {result.returncode}; see {log_path}")
+        detail = codex_failure_message(events)
+        context = f" (model={codex_model})" if codex_model else ""
+        reason = f": {detail}" if detail else ""
+        raise RuntimeError(f"codex exec failed with exit code {result.returncode}{context}{reason}; see {log_path}")
     return output or final_agent_message(events) or result.stdout
+
+
+def codex_failure_message(events: list[dict[str, Any]]) -> str:
+    """Surface the terminal failure, rather than unrelated metadata warnings."""
+    for event in reversed(events):
+        if event.get("type") == "turn.failed":
+            error = event.get("error")
+            message = error.get("message") if isinstance(error, dict) else error
+        elif event.get("type") == "error":
+            message = event.get("message")
+        else:
+            continue
+        if not isinstance(message, str) or not message.strip():
+            continue
+        try:
+            decoded = json.loads(message)
+        except (ValueError, TypeError):
+            decoded = None
+        if isinstance(decoded, dict) and isinstance(decoded.get("error"), dict):
+            nested = decoded["error"].get("message")
+            if isinstance(nested, str) and nested.strip():
+                message = nested
+        return " ".join(message.split())[:1000]
+    return ""
 
 
 def codex_sibling_artifact_path(log_path: Path, suffix: str) -> Path:
@@ -2605,6 +2632,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--skip-codex", action="store_true", help="Write only the prompt file; do not run Codex.")
     parser.add_argument("--prompt-output", default="", help="Optional path to save the generated Codex prompt.")
     parser.add_argument("--validate-only", action="store_true", help="Do not submit to Discord after validation.")
+    parser.add_argument("--defer-run-state", action="store_true", help="Let the scheduled job update successful-run state after review submission.")
     parser.add_argument(
         "--isolated-dry-run",
         action="store_true",
@@ -2779,6 +2807,8 @@ def main(argv: list[str] | None = None) -> int:
         log_step("no eligible items found; saved empty result and skipping Discord submission")
     if args.isolated_dry_run:
         log_step("isolated dry-run: successful-run state was not updated")
+    elif args.defer_run_state:
+        log_step("scheduled job will update successful-run state after submission")
     else:
         write_last_run(run_state_path(args.topic, args.cadence))
         log_step(f"updated last-run state: {run_state_path(args.topic, args.cadence)}")

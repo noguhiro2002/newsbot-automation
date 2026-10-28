@@ -53,6 +53,17 @@ class EmptyGenerationTests(unittest.TestCase):
             command.assert_not_called()
             state.assert_not_called()
 
+    def test_scheduled_generation_defers_state_for_empty_and_nonempty_results(self):
+        for items in ([], [{"title": "News", "summary": "Summary", "url": "https://example.com/news"}]):
+            with self.subTest(empty=not items), patch(
+                "scripts.generate_payload_openai.run_codex", return_value=json.dumps({**self.payload, "items": items}),
+            ), patch("scripts.generate_payload_openai.run_newsbot_command", return_value=0) as command, patch(
+                "scripts.generate_payload_openai.write_last_run",
+            ) as state:
+                self.assertEqual(main(self.args + ["--single-agent", "--validate-only", "--defer-run-state"]), 0)
+                state.assert_not_called()
+                self.assertFalse(any(c.args[0][0] == "submit-review" for c in command.call_args_list))
+
     def test_malformed_outputs_are_not_treated_as_successful_empty_searches(self):
         invalid_payloads = [
             {key: value for key, value in self.payload.items() if key != "items"},

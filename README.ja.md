@@ -278,6 +278,7 @@ sudo scripts/install_cron_jobs.sh --app-dir /opt/newsbot-automation --user newsb
 
 ```dotenv
 NEWSBOT_CRON_USER=newsbot
+TZ=Asia/Tokyo
 NEWSBOT_CRON_TZ=Asia/Tokyo
 NEWSBOT_PYTHON_BIN=/opt/newsbot-automation/.venv/bin/python
 NEWSBOT_GENERATE_REVIEW_CRON="0 8 * * *"

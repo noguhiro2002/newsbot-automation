@@ -103,8 +103,11 @@ class DiscordBotClient:
         *,
         components: list[dict[str, Any]] | None = None,
         suppress_embeds: bool = True,
+        allowed_mentions: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {"content": content}
+        if allowed_mentions is not None:
+            payload["allowed_mentions"] = allowed_mentions
         if suppress_embeds:
             payload["flags"] = 4
         if components:

@@ -2,6 +2,9 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .venv/
+.conda-env/
+.conda-pkgs/
+.runtime/
 *.egg-info/
 .DS_Store
 ._*
@@ -14,6 +17,7 @@ payloads/*
 reports/
 security-scans/
 logs/*
+backups/*
 analysis/
 *.sqlite
 *.sqlite3

@@ -1,5 +1,16 @@
 # Linux Deployment
 
+## Host Timezone
+
+Set the VM host timezone to Japan Standard Time before installing schedules:
+
+```bash
+sudo timedatectl set-timezone Asia/Tokyo
+timedatectl status
+```
+
+Keep `TZ=Asia/Tokyo` and `NEWSBOT_CRON_TZ=Asia/Tokyo` in `.env`. Newsbot systemd timers also include `Asia/Tokyo` explicitly, so their intended wall-clock schedule remains stable even if the host timezone is changed accidentally. Database timestamps and backup filename timestamps remain UTC intentionally for unambiguous storage and compatibility.
+
 ## Prerequisites
 
 - Ubuntu Server or similar Linux host
@@ -169,7 +180,82 @@ WantedBy=multi-user.target
 
 If your Conda installation path is different, adjust the `ExecStart` path accordingly.
 
-## Example cron Jobs
+## Recommended systemd Timers
+
+For always-on Linux hosts and VMs, use systemd timers instead of cron. The timer installer uses timezone-aware `OnCalendar` expressions, enables `Persistent=true` so a missed run is started after the VM returns, creates verified compressed SQLite backups, and installs log rotation.
+
+```bash
+cd /opt/newsbot-automation
+sudo scripts/install_systemd_timers.sh \
+  --app-dir /opt/newsbot-automation \
+  --user newsbot \
+  --group newsbot \
+  --python-bin /absolute/path/to/python
+```
+
+The defaults are:
+
+- generate review candidates every Monday at 06:00 Asia/Tokyo
+- prepare weekly review every Monday at 09:00 Asia/Tokyo
+- back up `data/newsbot.sqlite` every day at 03:30 Asia/Tokyo
+- retain 14 compressed backups under `backups/sqlite`
+- rotate `logs/*.log` weekly, retaining 12 compressed rotations and rotating early at 10 MiB
+
+The installer validates every calendar expression and unit, enables the timers, runs the first SQLite backup immediately, and moves `/etc/cron.d/newsbot-automation` to a timestamped `.disabled` filename so jobs cannot run twice. Configure overrides in `.env`:
+
+```dotenv
+NEWSBOT_GENERATE_REVIEW_ON_CALENDAR="Mon *-*-* 06:00:00 Asia/Tokyo"
+NEWSBOT_PREPARE_WEEKLY_ON_CALENDAR="Mon *-*-* 09:00:00 Asia/Tokyo"
+NEWSBOT_SQLITE_BACKUP_ON_CALENDAR="*-*-* 03:30:00 Asia/Tokyo"
+NEWSBOT_SQLITE_BACKUP_KEEP=14
+NEWSBOT_SQLITE_BACKUP_DIR=
+```
+
+Inspect the schedule and logs with:
+
+```bash
+systemctl list-timers --all "newsbot-*"
+sudo journalctl -u newsbot-generate-review.service -n 100 --no-pager
+sudo journalctl -u newsbot-prepare-weekly.service -n 100 --no-pager
+sudo journalctl -u newsbot-sqlite-backup.service -n 100 --no-pager
+```
+
+The SQLite backup uses the SQLite Online Backup API, runs an integrity check before compression, writes atomically, and keeps permissions private. A local backup protects against application-level corruption or accidental deletion, but it does not replace an off-host Proxmox or PBS backup.
+
+### Generation retries and operational notifications
+
+`run_cron_task.sh generate-review` calls `scripts/run_scheduled_job.py` while holding the existing job lock. Collection and Discord submission each have at most three attempts, with 5- and 10-minute waits. Authentication, permission, unsupported-model, and missing-executable errors stop immediately. Collection attempts have a three-hour timeout; submission attempts have a ten-minute timeout.
+
+The job posts operational notices using `DISCORD_BOT_TOKEN` to **`DISCORD_REVIEW_CHANNEL_ID`**: first failure with retry plans, final failure when retries are exhausted or manual intervention is required, and recovery after a successful retry. Notices contain the stage, attempt count, JST timestamp, run ID, and diagnostic log locations. Raw exception bodies, credentials, and automatic mentions are excluded.
+
+Collection and review submission are separate stages. Submission retries reuse the same payload, and `submit-review` skips articles with recorded review messages. The search period is fixed across collection retries. The successful-run timestamp advances only after submission succeeds (or collection produces a valid empty payload), using the collection cutoff so a slow run does not create gaps in future searches.
+
+If Discord cannot be reached, notices remain under `data/cron/job-notifications/` (or the configured `NEWSBOT_CRON_STATE_DIR`). The installer also enables `newsbot-job-notifications.timer`, which retries delivery every five minutes by default and after boot. Rerun the timer installer when upgrading an existing deployment to add this timer. Unsent alerts are also retried when the next collection starts. Details are streamed to the systemd journal and appended to `logs/newsbot-scheduled-job.log`, covered by log rotation.
+
+```dotenv
+NEWSBOT_JOB_MAX_ATTEMPTS=3
+NEWSBOT_JOB_RETRY_SECONDS=300
+NEWSBOT_JOB_RETRY_BACKOFF=2
+NEWSBOT_JOB_RETRY_MAX_SECONDS=1800
+NEWSBOT_JOB_ATTEMPT_TIMEOUT_SECONDS=10800
+NEWSBOT_JOB_NOTIFICATIONS_ENABLED=true
+NEWSBOT_JOB_NOTIFICATION_EVENTS=retry,failed,recovered
+NEWSBOT_JOB_NOTIFICATION_RETRY_SECONDS=300
+```
+
+Attempts can be set to 1–3, the initial wait to 0–600 seconds, the backoff multiplier to 1–4, the wait cap to 0–1800 seconds, and the collection timeout to 1–10800 seconds. Each wait is `min(cap, initial_wait * multiplier ** (attempt - 1))`. Settings are read from `.env` for each job invocation.
+
+Set `NEWSBOT_JOB_NOTIFICATIONS_ENABLED=false` to disable both queuing and delivery (existing queued alerts are preserved). `NEWSBOT_JOB_NOTIFICATION_EVENTS` selects a comma-separated subset of `retry` (first failure), `failed` (final failure), and `recovered` (successful retry). Set it to `failed` for final failures only. The destination is the existing `DISCORD_REVIEW_CHANNEL_ID`.
+
+`NEWSBOT_JOB_NOTIFICATION_RETRY_SECONDS` sets the queued-alert delivery interval (60–3600 seconds). Rerun `scripts/install_systemd_timers.sh` after changing this value because it is written into a systemd timer; other settings take effect on the next invocation without reinstalling. To verify delivery without starting collection, run this as the configured service user:
+
+```bash
+/absolute/path/to/python scripts/run_scheduled_job.py test-notification
+systemctl list-timers --all 'newsbot-*'
+sudo journalctl -u newsbot-job-notifications.service -n 30 --no-pager
+```
+
+## Legacy cron Jobs
 
 Install cron jobs with the helper script:
 

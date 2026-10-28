@@ -262,6 +262,42 @@ class GeneratePayloadOpenAITests(unittest.TestCase):
             {"PATH": "/usr/bin", "HOME": "/home/newsbot"},
         )
 
+    @patch("scripts.generate_payload_openai.subprocess.run")
+    def test_run_codex_reports_terminal_model_error_and_preserves_artifacts(self, run):
+        from subprocess import CompletedProcess
+
+        reason = "The 'unavailable-model' model is not supported when using Codex with a ChatGPT account."
+        cases = [
+            {"type": "turn.failed", "error": {"message": json.dumps({"error": {"message": reason, "code": "model_not_found"}})}},
+            {"type": "error", "message": reason},
+            {"type": "turn.failed", "error": {"message": "Authentication expired"}},
+        ]
+        for event in cases:
+            with self.subTest(event=event), tempfile.TemporaryDirectory() as temp_dir:
+                stdout = json.dumps({"type": "item.completed", "item": {"type": "error", "message": "metadata warning"}}) + "\n" + json.dumps(event)
+                run.return_value = CompletedProcess([], 1, stdout=stdout, stderr="")
+                log_path = Path(temp_dir) / "master.codex.log"
+                with self.assertRaises(RuntimeError) as raised:
+                    run_codex(codex_bin="codex", codex_model="unavailable-model", reasoning_effort="high", codex_args=[], prompt="test", timeout=1, log_path=log_path)
+                message = str(raised.exception)
+                self.assertIn("model=unavailable-model", message)
+                self.assertIn("Authentication expired" if "Authentication" in stdout else reason, message)
+                self.assertNotIn("metadata warning", message)
+                self.assertIn(str(log_path), message)
+                self.assertTrue(log_path.exists())
+                self.assertEqual(log_path.with_name("master.codex.events.jsonl").read_text(), stdout)
+                self.assertFalse(Path(run.call_args.args[0][run.call_args.args[0].index("--output-last-message") + 1]).exists())
+
+    @patch("scripts.generate_payload_openai.subprocess.run")
+    def test_run_codex_failure_without_events_keeps_log_reference(self, run):
+        from subprocess import CompletedProcess
+
+        run.return_value = CompletedProcess([], 1, stdout="not json", stderr="failed")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            log_path = Path(temp_dir) / "master.codex.log"
+            with self.assertRaisesRegex(RuntimeError, "exit code 1; see"):
+                run_codex(codex_bin="codex", codex_model="", reasoning_effort="", codex_args=[], prompt="test", timeout=1, log_path=log_path)
+
     def test_main_skip_codex_writes_multi_agent_prompts_for_lab_automation(self):
         paper_api_result = {
             "period": "2026-05-30 to 2026-06-06 (JST)",
